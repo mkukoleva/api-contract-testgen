@@ -1,0 +1,45 @@
+# Демонстрационный OpenAPI-контракт.
+#
+# Этот файл нужен только для проверки ядра агента.
+# Реальный сервис запускать не требуется.
+#
+# Парсер должен определить:
+# - OpenAPI 3.0.3;
+# - REST;
+# - три GET-операции.
+
+openapi: 3.0.3
+
+info:
+  title: Demo Catalogue API
+  version: 1.0.0
+
+paths:
+
+  # Получение полного каталога.
+  /catalogue:
+    get:
+      responses:
+        "200":
+          description: Catalogue returned successfully
+
+  # Получение одного товара по идентификатору.
+  /catalogue/{id}:
+    get:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+
+      responses:
+        "200":
+          description: Item returned successfully
+
+  # Получение списка тегов.
+  /tags:
+    get:
+      responses:
+        "200":
+          description: Tags returned successfully
