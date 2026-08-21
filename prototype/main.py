@@ -18,12 +18,18 @@
 
 import argparse
 import json
+from datetime import datetime
+from pathlib import Path
 
 from langchain.agents import create_agent
 
 from llm.model import build_model
 from parser.contract import read_contract_summary
-from runner.tools import demo_api_test_tool
+from runner.tools import (
+    demo_api_test_tool,
+    generate_user_story_tool,
+    verify_user_story_tool,
+)
 
 
 # Системный prompt задаёт правила поведения ядра агента.
@@ -44,13 +50,22 @@ SYSTEM_PROMPT = """
 - Не придумывай информацию, которой нет в описании контракта.
 - Используй доступные инструменты, когда это требуется задачей.
 - Не вызывай один и тот же инструмент повторно без причины.
-- В текущем прототипе для демонстрации тестирования
-  используй demo_api_test_tool.
-- После успешного выполнения demo_api_test_tool
-  повторно его не вызывай.
-- После выполнения инструмента кратко объясни результат
-  и заверши работу.
+
+Порядок работы при демонстрации тестирования API:
+
+1. Сначала вызови demo_api_test_tool, чтобы продемонстрировать
+   тестирование API. После успешного выполнения повторно его не вызывай.
+2. Затем вызови generate_user_story_tool, передав ему путь к контракту,
+   чтобы сформировать user story — цепочку эндпоинтов с желаемым
+   результатом и конечной целью.
+3. Далее вызови verify_user_story_tool, передав ему steps и final_goal,
+   полученные от generate_user_story_tool, чтобы проверить цепочку.
+4. После выполнения всех шагов кратко объясни результат
+        и заверши работу.
 """
+
+# Каталог для сохранения markdown-отчётов агента.
+REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 
 
 def build_agent():
@@ -59,8 +74,6 @@ def build_agent():
 
     Здесь модели передаётся список инструментов,
     которые она имеет право выбирать и вызывать.
-
-    Сейчас доступен только один демонстрационный инструмент.
     """
 
     model = build_model()
@@ -69,6 +82,8 @@ def build_agent():
         model=model,
         tools=[
             demo_api_test_tool,
+            generate_user_story_tool,
+            verify_user_story_tool,
         ],
         system_prompt=SYSTEM_PROMPT,
     )
@@ -139,6 +154,25 @@ def run(contract_path: str) -> None:
     print("[CORE] Агент завершил работу")
     print("=" * 60)
     print(final_message.content)
+
+    # Сохраняем итоговый результат агента в markdown-отчёт
+    # с датой и временем в имени файла.
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now()
+    report_path = REPORTS_DIR / f"report_{now.strftime('%Y-%m-%d_%H%M%S')}.md"
+
+    report_content = (
+        f"# Отчёт агента тестирования API\n\n"
+        f"- Дата: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"- Контракт: {contract_path}\n\n"
+        f"---\n\n"
+        f"{final_message.content}\n"
+    )
+
+    report_path.write_text(report_content, encoding="utf-8")
+
+    print(f"[CORE] Отчёт сохранён: {report_path}")
 
 
 def main() -> None:

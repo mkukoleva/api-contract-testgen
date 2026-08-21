@@ -77,7 +77,7 @@ def build_model() -> ChatOpenAI:
     """
 
     # Перед созданием HTTP-клиента очищаем старую SSL-настройку.
-    _clear_unused_ssl_settings()
+    # _clear_unused_ssl_settings()
 
     api_key = os.getenv("DEEPCODE_API_KEY")
     base_url = os.getenv("DEEPCODE_BASE_URL")
