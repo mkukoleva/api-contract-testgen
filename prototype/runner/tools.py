@@ -263,3 +263,7 @@ def demo_api_test_tool(
         "message": "Демонстрационный инструмент успешно выполнился.",
         "recommendation": "Дополнительные инструменты не требуются.",
     }
+
+@tool
+def schematesis_tool():
+    pass
