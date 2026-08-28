@@ -12,13 +12,25 @@
 LLM -> выбор инструмента -> вызов Python-функции -> возврат результата -> LLM.
 """
 
+import json
+import os
+from pathlib import Path
 from typing import Any
 
+import requests
 from langchain.tools import tool
 from pydantic import BaseModel, Field
 
 from llm.model import build_model
 from parser.contract import read_contract_summary
+
+
+# Адрес микросервиса-обёртки над Schemathesis
+# (prototype/service_tools/schematesis). Можно переопределить
+# через переменную окружения, например при запуске в Docker.
+SCHEMATHESIS_SERVICE_URL = os.environ.get(
+    "SCHEMATHESIS_SERVICE_URL", "http://127.0.0.1:8080"
+).rstrip("/")
 
 
 class UserStoryStep(BaseModel):
@@ -265,5 +277,113 @@ def demo_api_test_tool(
     }
 
 @tool
-def schematesis_tool():
-    pass
+def schemathesis_tool(
+    contract_path: str,
+    base_url: str,
+    max_time: float | None = None,
+) -> dict[str, Any]:
+    """
+    Запустить контрактное тестирование API через микросервис Schemathesis.
+
+    Инструмент читает локальный OpenAPI/Swagger-файл и отправляет его
+    содержимое (как есть, YAML/JSON) в микросервис schematesis
+    (prototype/service_tools/schematesis) по эндпоинту POST /test в теле
+    запроса с заголовком Content-Type: application/yaml.
+
+    Микросервис запускает Schemathesis (in-process) и возвращает
+    JSON-сводку: число сценариев (passed/failed/errors/skipped),
+    список найденных дефектов (failures) и время прогона
+    (running_time).
+
+    Args:
+        contract_path: Путь к OpenAPI/Swagger-файлу контракта.
+        base_url: Адрес тестируемого API, например
+            'http://127.0.0.1:9911'.
+        max_time: Лимит времени прогона в секундах (опционально).
+
+    Returns:
+        Словарь со сводкой прогона Schemathesis (status, scenarios,
+        failures, running_time и т.д.) либо status='error' при сбое
+        чтения контракта или обращения к сервису.
+    """
+
+    print()
+    print("=" * 60)
+    print("[TOOL] Вызван schemathesis_tool")
+    print(f"[TOOL] Контракт: {contract_path}")
+    print(f"[TOOL] Base URL: {base_url}")
+    print(f"[TOOL] Max time: {max_time}")
+    print("=" * 60)
+    print()
+
+    path = Path(contract_path)
+    if not path.exists():
+        return {
+            "tool": "schemathesis_tool",
+            "status": "error",
+            "message": f"Контракт не найден: {path}",
+        }
+
+    try:
+        schema_text = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return {
+            "tool": "schemathesis_tool",
+            "status": "error",
+            "message": f"Не удалось прочитать контракт: {exc}",
+        }
+
+    url = f"{SCHEMATHESIS_SERVICE_URL}/test"
+    params: dict[str, Any] = {"base_url": base_url}
+    if max_time is not None:
+        params["max_time"] = max_time
+
+
+    client_timeout = (max_time or 300) + 120
+
+    try:
+        response = requests.post(
+            url,
+            params=params,
+            data=schema_text.encode("utf-8"),
+            headers={"Content-Type": "application/yaml"},
+            timeout=client_timeout,
+        )
+    except requests.RequestException as exc:
+        return {
+            "tool": "schemathesis_tool",
+            "status": "error",
+            "message": (
+                f"Не удалось обратиться к сервису Schemathesis "
+                f"({url}): {exc}"
+            ),
+        }
+
+    try:
+        payload = response.json()
+    except json.JSONDecodeError:
+        return {
+            "tool": "schemathesis_tool",
+            "status": "error",
+            "message": (
+                f"Сервис вернул не-JSON (код {response.status_code}): "
+                f"{response.text[:500]}"
+            ),
+        }
+
+    if response.status_code != 200 or payload.get("status") == "error":
+        return {
+            "tool": "schemathesis_tool",
+            "status": "error",
+            "message": payload.get(
+                "message",
+                f"Ошибка сервиса (код {response.status_code})",
+            ),
+            "details": payload,
+        }
+
+    return {
+        "tool": "schemathesis_tool",
+        "status": "success",
+        **payload,
+    }

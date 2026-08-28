@@ -28,6 +28,7 @@ from parser.contract import read_contract_summary
 from runner.tools import (
     demo_api_test_tool,
     generate_user_story_tool,
+    schemathesis_tool,
     verify_user_story_tool,
 )
 
@@ -53,14 +54,22 @@ SYSTEM_PROMPT = """
 
 Порядок работы при демонстрации тестирования API:
 
-1. Сначала вызови demo_api_test_tool, чтобы продемонстрировать
+1. Сначала вызови schemathesis_tool, чтобы выполнить реальное
+   контрактное тестирование API через микросервис Schemathesis.
+   Передай ему:
+   - contract_path — путь к контракту (возьми из поля "file"
+     краткого описания контракта);
+   - base_url — адрес тестируемого API, всегда
+     "http://127.0.0.1:9911".
+   После успешного выполнения повторно его не вызывай.
+2. Затем вызови demo_api_test_tool, чтобы продемонстрировать
    тестирование API. После успешного выполнения повторно его не вызывай.
-2. Затем вызови generate_user_story_tool, передав ему путь к контракту,
+3. Далее вызови generate_user_story_tool, передав ему путь к контракту,
    чтобы сформировать user story — цепочку эндпоинтов с желаемым
    результатом и конечной целью.
-3. Далее вызови verify_user_story_tool, передав ему steps и final_goal,
+4. Далее вызови verify_user_story_tool, передав ему steps и final_goal,
    полученные от generate_user_story_tool, чтобы проверить цепочку.
-4. После выполнения всех шагов кратко объясни результат
+5. После выполнения всех шагов кратко объясни результат
         и заверши работу.
 """
 
@@ -81,6 +90,7 @@ def build_agent():
     return create_agent(
         model=model,
         tools=[
+            schemathesis_tool,
             demo_api_test_tool,
             generate_user_story_tool,
             verify_user_story_tool,
@@ -178,7 +188,8 @@ def run(contract_path: str) -> None:
 def main() -> None:
     """
     Обработать аргументы командной строки и запустить агента.
-
+    # Клиентский таймаут с запасом: сервис сам останавливает прогон
+    # по max_time (Watchdog), но ответ должен успеть вернуться.
     Пример:
 
     python3 main.py tests/fixtures/demo_openapi.yaml
