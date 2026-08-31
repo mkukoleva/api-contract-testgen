@@ -21,8 +21,8 @@ import requests
 from langchain.tools import tool
 from pydantic import BaseModel, Field
 
-from llm.model import build_model
-from parser.contract import read_contract_summary
+from ..llm.model import build_model
+from ..parser.contract import read_contract_summary
 
 
 # Адрес микросервиса-обёртки над Schemathesis

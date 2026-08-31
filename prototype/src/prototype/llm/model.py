@@ -21,8 +21,11 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
 
-# Определяем абсолютный путь до папки prototype.
-PROTOTYPE_DIR = Path(__file__).resolve().parents[1]
+# Определяем абсолютный путь до папки prototype
+# (поднимаемся вверх, пока не найдём каталог с pyproject.toml).
+PROTOTYPE_DIR = Path(__file__).resolve()
+while not (PROTOTYPE_DIR / "pyproject.toml").is_file():
+    PROTOTYPE_DIR = PROTOTYPE_DIR.parent
 
 # Загружаем настройки проекта из prototype/.env.
 #

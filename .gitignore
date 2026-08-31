@@ -7,3 +7,5 @@ venv/
 .mutmut-cache
 .idea/
 .vscode/
+.kilo/
+.hypothesis/

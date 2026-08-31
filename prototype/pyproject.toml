@@ -1,0 +1,22 @@
+[project]
+name = "prototype"
+version = "0.1.0"
+description = "prototype"
+requires-python = ">=3.14"
+dependencies = [
+    "langchain==1.3.15",
+    "langchain-openai==1.5.2",
+    "openai==3.3.0",
+    "pydantic==2.13.4",
+    "pytest==9.1.1",
+    "python-dotenv==1.2.3",
+    "pyyaml==6.0.3",
+    "requests==2.34.2",
+]
+
+[project.scripts]
+tester = "prototype:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
