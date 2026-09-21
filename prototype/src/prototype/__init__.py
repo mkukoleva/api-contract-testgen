@@ -12,26 +12,15 @@
 7. LLM анализирует результат.
 8. LLM либо выбирает следующий tool, либо завершает работу.
 
-Пока доступен только один демонстрационный tool.
-Позже сюда будут добавлены реальные инструменты.
+Доступны четыре инструмента: Schemathesis, демонстрационная проверка API,
+генерация и проверка user story. Проверка API и user story пока являются
+заглушками. Контракты будущего pytest-runner не подключены к циклу агента.
 """
 
 import argparse
 import json
 from datetime import datetime
 from pathlib import Path
-
-from langchain.agents import create_agent
-
-from .llm.model import build_model
-from .parser.contract import read_contract_summary
-from .runner.tools import (
-    demo_api_test_tool,
-    generate_user_story_tool,
-    schemathesis_tool,
-    verify_user_story_tool,
-)
-
 
 # Системный prompt задаёт правила поведения ядра агента.
 SYSTEM_PROMPT = """
@@ -85,6 +74,18 @@ def build_agent():
     которые она имеет право выбирать и вызывать.
     """
 
+    # Runner-контракты можно импортировать без LLM-зависимостей и загрузки .env.
+    # Зависимости агента нужны только при его создании.
+    from langchain.agents import create_agent
+
+    from .llm.model import build_model
+    from .runner.tools import (
+        demo_api_test_tool,
+        generate_user_story_tool,
+        schemathesis_tool,
+        verify_user_story_tool,
+    )
+
     model = build_model()
 
     return create_agent(
@@ -106,6 +107,8 @@ def run(contract_path: str) -> None:
     Args:
         contract_path: Путь к OpenAPI/Swagger-файлу.
     """
+
+    from .parser.contract import read_contract_summary
 
     # Шаг 1. Читаем контракт обычным Python-кодом.
     print("[CORE] Читаю API-контракт...")
@@ -188,8 +191,6 @@ def run(contract_path: str) -> None:
 def main() -> None:
     """
     Обработать аргументы командной строки и запустить агента.
-    # Клиентский таймаут с запасом: сервис сам останавливает прогон
-    # по max_time (Watchdog), но ответ должен успеть вернуться.
     Пример:
 
     python3 main.py tests/fixtures/demo_openapi.yaml
