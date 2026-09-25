@@ -1,7 +1,7 @@
 """
 Главный файл прототипа ИИ-агента.
 
-Здесь собирается весь цикл:
+Здесь собирается полный цикл:
 
 1. Python читает API-контракт.
 2. Из контракта создаётся короткое summary.
@@ -11,18 +11,23 @@
 6. Результат tool возвращается LLM.
 7. LLM анализирует результат.
 8. LLM либо выбирает следующий tool, либо завершает работу.
+9. Рассчитываются метрики качества генерации.
+10. Результаты сохраняются в отчёты.
 
-Доступны четыре инструмента: Schemathesis, демонстрационная проверка API,
-генерация и проверка user story. Проверка API и user story пока являются
-заглушками. Контракты будущего pytest-runner не подключены к циклу агента.
+Доступны инструменты:
+- Schemathesis;
+- демонстрационная проверка API;
+- генерация user story;
+- проверка user story.
 """
 
 import argparse
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
-# Системный prompt задаёт правила поведения ядра агента.
+
 SYSTEM_PROMPT = """
 Ты являешься ядром автоматизированного агента тестирования API.
 
@@ -59,23 +64,18 @@ SYSTEM_PROMPT = """
 4. Далее вызови verify_user_story_tool, передав ему steps и final_goal,
    полученные от generate_user_story_tool, чтобы проверить цепочку.
 5. После выполнения всех шагов кратко объясни результат
-        и заверши работу.
+   и заверши работу.
 """
 
-# Каталог для сохранения markdown-отчётов агента.
+
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 
 
 def build_agent():
     """
     Создать LangChain-агента.
-
-    Здесь модели передаётся список инструментов,
-    которые она имеет право выбирать и вызывать.
     """
 
-    # Runner-контракты можно импортировать без LLM-зависимостей и загрузки .env.
-    # Зависимости агента нужны только при его создании.
     from langchain.agents import create_agent
 
     from .llm.model import build_model
@@ -100,17 +100,59 @@ def build_agent():
     )
 
 
+def _extract_final_message(result) -> str:
+    """
+    Получить итоговое сообщение агента.
+    """
+
+    messages = result.get("messages", [])
+
+    if not messages:
+        return "Агент не вернул сообщений."
+
+    final_message = messages[-1]
+
+    content = getattr(final_message, "content", "")
+
+    if isinstance(content, str):
+        return content
+
+    return json.dumps(
+        content,
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _append_metrics_to_report(
+    report_path: Path,
+    metrics_markdown: str,
+) -> None:
+    """
+    Добавить рассчитанные метрики в существующий Markdown-отчёт.
+    """
+
+    with report_path.open(
+        "a",
+        encoding="utf-8",
+    ) as file:
+        file.write("\n\n")
+        file.write("---\n\n")
+        file.write(metrics_markdown)
+
+
 def run(contract_path: str) -> None:
     """
     Запустить полный цикл работы агента для одного API-контракта.
-
-    Args:
-        contract_path: Путь к OpenAPI/Swagger-файлу.
     """
 
+    from .evaluate.metrics import (
+        calculate_metrics,
+        format_metrics_markdown,
+        save_metrics_report,
+    )
     from .parser.contract import read_contract_summary
 
-    # Шаг 1. Читаем контракт обычным Python-кодом.
     print("[CORE] Читаю API-контракт...")
 
     contract = read_contract_summary(contract_path)
@@ -128,11 +170,8 @@ def run(contract_path: str) -> None:
     print("[CORE] Передаю краткое описание контракта агенту...")
     print()
 
-    # Создаём агента только после успешного чтения контракта.
     agent = build_agent()
 
-    # LLM получает не весь OpenAPI-файл,
-    # а только короткое структурированное описание.
     user_message = f"""
 Цель:
 Продемонстрировать цикл работы агента автоматического тестирования API.
@@ -146,7 +185,9 @@ def run(contract_path: str) -> None:
 и реши, требуется ли следующий шаг.
 """
 
-    # Здесь запускается агентный цикл LangChain.
+    # Засекаем именно время работы агентного цикла.
+    generation_started_at = time.perf_counter()
+
     result = agent.invoke(
         {
             "messages": [
@@ -158,46 +199,98 @@ def run(contract_path: str) -> None:
         }
     )
 
-    # Последнее сообщение должно содержать итоговый ответ LLM
-    # после выполнения всех необходимых tools.
-    final_message = result["messages"][-1]
+    generation_time = time.perf_counter() - generation_started_at
+
+    final_message = _extract_final_message(result)
 
     print()
     print("=" * 60)
     print("[CORE] Агент завершил работу")
     print("=" * 60)
-    print(final_message.content)
+    print(final_message)
 
-    # Сохраняем итоговый результат агента в markdown-отчёт
-    # с датой и временем в имени файла.
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    REPORTS_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     now = datetime.now()
-    report_path = REPORTS_DIR / f"report_{now.strftime('%Y-%m-%d_%H%M%S')}.md"
+
+    report_path = REPORTS_DIR / (
+        f"report_{now.strftime('%Y-%m-%d_%H%M%S')}.md"
+    )
 
     report_content = (
         f"# Отчёт агента тестирования API\n\n"
         f"- Дата: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"- Контракт: {contract_path}\n\n"
         f"---\n\n"
-        f"{final_message.content}\n"
+        f"{final_message}\n"
     )
 
-    report_path.write_text(report_content, encoding="utf-8")
+    report_path.write_text(
+        report_content,
+        encoding="utf-8",
+    )
 
-    print(f"[CORE] Отчёт сохранён: {report_path}")
+    print(
+        f"[CORE] Основной отчёт сохранён: {report_path}"
+    )
+
+    # ==========================================================
+    # Расчёт метрик качества — задача 2.1.7
+    # ==========================================================
+
+    metrics = calculate_metrics(
+        agent_result=result,
+        contract_summary=contract,
+        generation_time_seconds=generation_time,
+    )
+
+    metrics_json_path = save_metrics_report(
+        metrics,
+        REPORTS_DIR,
+    )
+
+    metrics_markdown = format_metrics_markdown(metrics)
+
+    _append_metrics_to_report(
+        report_path,
+        metrics_markdown,
+    )
+
+    print()
+    print("=" * 60)
+    print("[METRICS] Метрики качества генерации")
+    print("=" * 60)
+
+    print(metrics_markdown)
+
+    print(
+        f"[METRICS] JSON-отчёт сохранён: "
+        f"{metrics_json_path}"
+    )
+
+    print(
+        f"[METRICS] Markdown-отчёт обновлён: "
+        f"{report_path}"
+    )
 
 
 def main() -> None:
     """
-    Обработать аргументы командной строки и запустить агента.
+    Обработать аргументы командной строки.
+
     Пример:
 
-    python3 main.py tests/fixtures/demo_openapi.yaml
+        python main.py tests/fixtures/demo_openapi.yaml
     """
 
     parser = argparse.ArgumentParser(
-        description="Прототип ИИ-агента для тестирования API-контрактов."
+        description=(
+            "Прототип ИИ-агента "
+            "для тестирования API-контрактов."
+        )
     )
 
     parser.add_argument(
