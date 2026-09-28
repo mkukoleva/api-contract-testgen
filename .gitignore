@@ -10,3 +10,4 @@ venv/
 .kilo/
 .hypothesis/
 .coverage*
+.runner-results/
