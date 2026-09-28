@@ -9,3 +9,4 @@ venv/
 .vscode/
 .kilo/
 .hypothesis/
+.coverage*

@@ -314,6 +314,7 @@ def calculate_metrics(
     agent_result: dict[str, Any],
     contract_summary: dict[str, Any],
     generation_time_seconds: float,
+    mutation_score_percent: float | None = None,
 ) -> GenerationMetrics:
     """
     Рассчитать все доступные метрики по одному запуску.
@@ -327,6 +328,9 @@ def calculate_metrics(
 
         generation_time_seconds:
             Время работы agent.invoke().
+
+        mutation_score_percent:
+            Опциональный Mutation Score в процентах (задача 2.2.9).
 
     Returns:
         GenerationMetrics.
@@ -362,10 +366,12 @@ def calculate_metrics(
         output_tokens,
     )
 
-    # Mutation Score пока не рассчитывается автоматически:
-    # отдельный mutation testing runner в текущем прототипе
-    # ещё не подключён.
-    mutation_score = None
+    # Mutation Score (задача 2.2.9):
+    # берётся из переданного значения либо из agent_result, если доступно
+    if mutation_score_percent is not None:
+        mutation_score = mutation_score_percent
+    else:
+        mutation_score = agent_result.get("mutation_score_percent")
 
     # Аналогично Runnability:
     # полноценный pytest-runner пока не подключён к агенту.
