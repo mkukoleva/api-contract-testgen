@@ -534,3 +534,45 @@ def test_make_slug_limits_length_without_trailing_dash():
     slug = make_slug("a" * 63 + " b", "x")
     assert len(slug) <= 64
     assert not slug.endswith("-")
+
+
+def test_save_tests_tool_returns_compact_result(tmp_path, monkeypatch):
+    pytest.importorskip("langchain")
+    from prototype.runner.tools import save_tests_tool
+
+    monkeypatch.setenv("TESTGEN_OUTPUT_DIR", str(tmp_path))
+    result = save_tests_tool.invoke({
+        "contract_path": str(CONTRACT),
+        "files": [
+            {"name": "test_good.py", "code": GOOD},
+            {"name": "test_broken.py", "code": "def test_a(:\n"},
+        ],
+        "model": "deepseek",
+    })
+
+    assert result["tool"] == "save_tests_tool"
+    assert result["status"] == "success"
+    assert Path(result["tests_dir"]).is_dir()
+    assert result["collection_status"] == "ok"
+    assert result["summary"]["collected"] == 2
+    # SyntaxError text differs between Python versions; only the prefix is stable.
+    assert len(result["errors"]) == 1
+    assert result["errors"][0].startswith("test_broken.py: line 1:")
+    assert GOOD not in json.dumps(result)
+
+
+@pytest.mark.parametrize("files, contract", [
+    ([{"name": "../test_evil.py", "code": ""}], CONTRACT),
+    ([{"code": "def test_a(): pass"}], CONTRACT),
+    ([], CONTRACT),
+    ([{"name": "test_a.py", "code": GOOD}], Path("missing.yaml")),
+])
+def test_save_tests_tool_reports_errors_instead_of_raising(tmp_path, monkeypatch, files, contract):
+    pytest.importorskip("langchain")
+    from prototype.runner.tools import save_tests_tool
+
+    monkeypatch.setenv("TESTGEN_OUTPUT_DIR", str(tmp_path))
+    result = save_tests_tool.invoke({"contract_path": str(contract), "files": files})
+    assert result["status"] == "error"
+    assert result["message"]
+    assert list(tmp_path.iterdir()) == []
