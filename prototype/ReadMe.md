@@ -70,7 +70,8 @@ py -3.12 -m uv run --locked tester --help
 ```
 
 После установки зависимостей текущим проверкам не нужны `.env`, ключи LLM,
-сетевые запросы или работающий Docker. На этапе 1 проверено **38 тестов**
+доступ к внешней сети или работающий Docker. Проверка стенда использует временный
+HTTP-сервер на loopback. На этапе 1 проверено **38 тестов**
 с Python 3.14.7 и pytest 9.1.1: 37 проверок интерфейса runner и совместимости,
 один существующий smoke-тест. Сборка агента проверяется с подменой внешних
 зависимостей; это не сквозной прогон с настоящим LLM или Schemathesis.
@@ -95,3 +96,19 @@ py -3.12 -m uv run --locked tester --help
 (Windows). Если IDE не видит локальный импорт `prototype.runner.contracts`,
 отметьте каталог `src` как **Mark Directory as → Sources Root**.
 Устанавливать сторонние пакеты для этого импорта не требуется.
+
+### Стенд для pytest-runner — этап 2
+
+Подготовлен отдельный [стенд Catalogue](../benchmark/catalogue/README.md):
+API, база с демонстрационными данными, полный Swagger-контракт и скрипт
+проверки готовности. Существующий Compose с Schemathesis не изменён.
+Из каталога `prototype`, после запуска Docker Desktop:
+
+```powershell
+docker compose -f ../benchmark/catalogue/compose.yaml up -d --wait --wait-timeout 120
+py -3.12 -m uv run --locked python ../benchmark/catalogue/check_ready.py --timeout 120
+```
+
+Скрипт должен вернуть `status: ready`. На 2026-09-28 все **59 тестов**
+прототипа прошли.  Запуск pytest в контейнере и ограничения сети runner — следующие
+этапы пункта 2.2.6.
