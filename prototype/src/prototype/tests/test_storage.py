@@ -576,3 +576,26 @@ def test_save_tests_tool_reports_errors_instead_of_raising(tmp_path, monkeypatch
     assert result["status"] == "error"
     assert result["message"]
     assert list(tmp_path.iterdir()) == []
+
+
+def test_project_pytest_does_not_collect_saved_versions(tmp_path):
+    # Two versions of one contract share module names; if the project's own
+    # pytest walked into generated/, it would run LLM code with the developer's
+    # environment and fail with "import file mismatch".
+    (tmp_path / "pyproject.toml").write_bytes((SOURCE_DIR.parent / "pyproject.toml").read_bytes())
+    write_tests(tmp_path / "src" / "prototype" / "tests", test_own="def test_own():\n    pass\n")
+    for run_id in ("2026-09-28_120000", "2026-09-28_120000_2"):
+        write_tests(
+            tmp_path / "generated" / "demo" / run_id / "tests",
+            test_a="raise RuntimeError('generated code must not run')\n",
+        )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
+        cwd=tmp_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=60, env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+                         "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "src/prototype/tests/test_own.py::test_own" in result.stdout
+    assert "generated" not in result.stdout
