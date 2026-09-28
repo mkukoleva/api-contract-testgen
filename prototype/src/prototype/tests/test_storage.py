@@ -106,3 +106,77 @@ def test_save_request_rejects_duplicate_file_names():
 
     with pytest.raises(ValueError, match="unique"):
         SaveRequest("api.yaml", (GeneratedFile("test_a.py", ""), GeneratedFile("test_a.py", "x = 1")))
+
+
+def test_analysis_counts_functions_methods_and_async_tests():
+    from prototype.storage.analysis import analyze_test_file
+
+    code = (
+        '"""Docstring."""\n'
+        "import pytest\n"
+        "BASE = '/catalogue'\n"
+        "timeout: float = 5.0\n\n"
+        "def helper():\n    pass\n\n"
+        "def test_one():\n    pass\n\n"
+        "async def test_two():\n    pass\n\n"
+        "class TestTags:\n"
+        "    def test_three(self):\n        pass\n"
+        "    def helper(self):\n        pass\n\n"
+        "class Helper:\n    def test_ignored(self):\n        pass\n"
+    )
+    result = analyze_test_file(code, "test_a.py")
+    assert result.status == "ok"
+    assert result.test_functions == 3
+    assert result.warnings == ()
+    assert result.error is None
+
+
+def test_analysis_marks_file_without_tests():
+    from prototype.storage.analysis import analyze_test_file
+
+    result = analyze_test_file("import pytest\n", "test_a.py")
+    assert (result.status, result.test_functions) == ("no_tests", 0)
+
+
+@pytest.mark.parametrize("code", [
+    "def test_a(:\n    pass\n",
+    "def test_a():\npass\n",
+    "x = 1\x00\n",
+])
+def test_analysis_reports_syntax_error_without_raising(code):
+    from prototype.storage.analysis import analyze_test_file
+
+    result = analyze_test_file(code, "test_a.py")
+    assert result.status == "syntax_error"
+    assert result.test_functions is None
+    assert result.error
+
+
+def test_analysis_reports_line_of_syntax_error():
+    from prototype.storage.analysis import analyze_test_file
+
+    result = analyze_test_file("x = 1\ndef test_a(:\n    pass\n", "test_a.py")
+    assert result.error.startswith("line 2:")
+
+
+@pytest.mark.parametrize("statement", [
+    "requests.get('http://example.com')",
+    "import time\ntime.sleep(1)",
+    "if True:\n    x = 1",
+    "for i in range(3):\n    pass",
+    "with open('x') as f:\n    pass",
+])
+def test_analysis_warns_about_top_level_code(statement):
+    from prototype.storage.analysis import analyze_test_file
+
+    result = analyze_test_file(statement + "\n\ndef test_a():\n    pass\n", "test_a.py")
+    assert result.status == "ok"
+    assert result.warnings == ("top_level_code",)
+
+
+def test_normalize_code_handles_crlf_cr_and_bom():
+    from prototype.storage.analysis import analyze_test_file, normalize_code
+
+    code = normalize_code("\ufeffdef test_a():\r\n    pass\r\rx = 1\n")
+    assert code == "def test_a():\n    pass\n\nx = 1\n"
+    assert analyze_test_file(code, "test_a.py").status == "ok"
