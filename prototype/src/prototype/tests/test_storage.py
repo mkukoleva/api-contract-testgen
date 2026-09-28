@@ -180,3 +180,147 @@ def test_normalize_code_handles_crlf_cr_and_bom():
     code = normalize_code("\ufeffdef test_a():\r\n    pass\r\rx = 1\n")
     assert code == "def test_a():\n    pass\n\nx = 1\n"
     assert analyze_test_file(code, "test_a.py").status == "ok"
+
+
+COLLECT_OUTPUT = """\
+test_good.py::test_a
+test_good.py::TestX::test_b
+test_good.py::test_p[1]
+
+=================================== ERRORS ====================================
+________________________ ERROR collecting test_bad.py _________________________
+ImportError while importing test module 'C:\\tmp\\test_bad.py'.
+E   ModuleNotFoundError: No module named 'nonexistent_mod'
+________________________ ERROR collecting test_worse.py _______________________
+E   NameError: name 'x' is not defined
+=========================== short test summary info ===========================
+ERROR test_bad.py
+ERROR test_worse.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!
+3 tests collected, 2 errors in 0.46s
+"""
+
+
+def test_parse_nodeids_reads_quiet_collect_output():
+    from prototype.storage.collect import parse_nodeids
+
+    assert parse_nodeids(COLLECT_OUTPUT) == [
+        "test_good.py::test_a", "test_good.py::TestX::test_b", "test_good.py::test_p[1]",
+    ]
+    assert parse_nodeids("\nno tests collected in 0.01s\n") == []
+
+
+def test_parse_collection_errors_keeps_one_entry_per_module():
+    from prototype.storage.collect import parse_collection_errors
+
+    errors = parse_collection_errors(COLLECT_OUTPUT)
+    assert len(errors) == 2
+    assert errors[0].startswith("test_bad.py:")
+    assert "nonexistent_mod" in errors[0]
+    assert errors[1].startswith("test_worse.py:")
+    assert "short test summary" not in errors[1]
+
+
+def test_parse_collection_errors_truncates_long_messages():
+    from prototype.storage.collect import MAX_ERROR_CHARS, parse_collection_errors
+
+    output = "____ ERROR collecting test_a.py ____\n" + "E" * 10_000 + "\n"
+    assert len(parse_collection_errors(output)[0]) == MAX_ERROR_CHARS
+
+
+def write_tests(directory, **files):
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, code in files.items():
+        (directory / f"{name}.py").write_text(code, encoding="utf-8")
+    return directory
+
+
+def test_collect_tests_lists_nodeids(tmp_path):
+    from prototype.storage.collect import collect_tests
+
+    tests_dir = write_tests(
+        tmp_path / "tests",
+        test_a="import pytest\n\n@pytest.mark.parametrize('x', [1, 2])\ndef test_p(x):\n    pass\n",
+    )
+    result = collect_tests(tests_dir, 60)
+    assert result["status"] == "ok"
+    assert result["collected"] == 2
+    assert result["nodeids"] == ["test_a.py::test_p[1]", "test_a.py::test_p[2]"]
+    assert result["errors"] == []
+    assert result["duration_seconds"] >= 0
+
+
+def test_collect_tests_reports_import_errors_and_keeps_good_modules(tmp_path):
+    from prototype.storage.collect import collect_tests
+
+    tests_dir = write_tests(
+        tmp_path / "tests",
+        test_bad="import nonexistent_module_xyz\n\ndef test_a():\n    pass\n",
+        test_good="def test_b():\n    pass\n",
+    )
+    result = collect_tests(tests_dir, 60)
+    assert result["status"] == "errors"
+    assert result["nodeids"] == ["test_good.py::test_b"]
+    assert len(result["errors"]) == 1
+    assert "nonexistent_module_xyz" in result["errors"][0]
+
+
+def test_collect_tests_reports_modules_without_tests(tmp_path):
+    from prototype.storage.collect import collect_tests
+
+    result = collect_tests(write_tests(tmp_path / "tests", test_a="X = 1\n"), 60)
+    assert (result["status"], result["collected"]) == ("no_tests", 0)
+
+
+def test_collect_tests_stops_at_timeout(tmp_path):
+    from prototype.storage.collect import collect_tests
+
+    tests_dir = write_tests(
+        tmp_path / "tests",
+        test_a="import time\ntime.sleep(30)\n\ndef test_a():\n    pass\n",
+    )
+    result = collect_tests(tests_dir, 1)
+    assert result["status"] == "timeout"
+    assert result["collected"] is None
+    assert result["duration_seconds"] < 20
+
+
+def test_collect_tests_leaves_no_cache_files(tmp_path):
+    from prototype.storage.collect import collect_tests
+
+    tests_dir = write_tests(tmp_path / "tests", test_a="def test_a():\n    assert 1\n")
+    collect_tests(tests_dir, 60)
+    assert sorted(path.name for path in tmp_path.rglob("*")) == ["test_a.py", "tests"]
+
+
+def test_collect_tests_hides_llm_credentials_from_generated_code(tmp_path, monkeypatch):
+    from prototype.storage.collect import collect_tests
+
+    monkeypatch.setenv("DEEPCODE_API_KEY", "secret")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--this-option-does-not-exist")
+    tests_dir = write_tests(
+        tmp_path / "tests",
+        test_a="import os\nassert 'DEEPCODE_API_KEY' not in os.environ\n\ndef test_a():\n    pass\n",
+    )
+    assert collect_tests(tests_dir, 60)["status"] == "ok"
+
+
+def test_skipped_collection_has_the_common_shape():
+    from prototype.storage.collect import skipped_collection
+
+    assert skipped_collection() == {
+        "status": "skipped", "collected": None, "nodeids": [], "errors": [],
+        "duration_seconds": 0.0,
+    }
+
+
+def test_collect_tests_does_not_autoload_third_party_pytest_plugins(tmp_path):
+    from prototype.storage.collect import collect_tests
+
+    # langsmith (a LangChain dependency) registers a pytest11 plugin; generated
+    # code must not share a process with it, and loading it slows collection.
+    tests_dir = write_tests(
+        tmp_path / "tests",
+        test_a="import sys\nassert 'langsmith' not in sys.modules\n\ndef test_a():\n    pass\n",
+    )
+    assert collect_tests(tests_dir, 60)["status"] == "ok"
