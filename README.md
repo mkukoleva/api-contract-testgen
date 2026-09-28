@@ -15,3 +15,4 @@
 
 - [Установка, запуск агента и проверки](prototype/ReadMe.md).
 - [Соглашение о pytest-runner для команды](docs/adr/0002-pytest-runner-contract.md).
+- [Сохранение сгенерированных тестов](docs/adr/0003-generated-tests-storage.md).
