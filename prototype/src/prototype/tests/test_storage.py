@@ -1,5 +1,7 @@
 """Generated-tests storage checks; no Docker, LLM credentials or network required."""
 
+from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -324,3 +326,211 @@ def test_collect_tests_does_not_autoload_third_party_pytest_plugins(tmp_path):
         test_a="import sys\nassert 'langsmith' not in sys.modules\n\ndef test_a():\n    pass\n",
     )
     assert collect_tests(tests_dir, 60)["status"] == "ok"
+
+
+CONTRACT = Path(__file__).parent / "fixtures" / "demo_openapi.yaml"
+GOOD = (
+    "def test_list():\n    assert 1 + 1 == 2\n\n\n"
+    "class TestTags:\n    def test_tags(self):\n        assert True\n"
+)
+FIXED_TIME = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone(timedelta(hours=7)))
+
+
+def save(root, *files, contract=CONTRACT, **kwargs):
+    from prototype.storage import GeneratedFile, SaveRequest, save_test_suite
+
+    return save_test_suite(SaveRequest(
+        contract_path=contract,
+        files=tuple(GeneratedFile(name, code) for name, code in files),
+        output_root=root, **kwargs,
+    ))
+
+
+def test_save_writes_version_with_manifest(tmp_path, monkeypatch):
+    from prototype.storage import store
+
+    monkeypatch.setattr(store, "_now", lambda: FIXED_TIME)
+    saved = save(tmp_path / "generated", ("test_catalogue.py", GOOD),
+                 model="deepseek", generator_meta={"prompt": "v1"})
+
+    run_dir = tmp_path / "generated" / "demo-catalogue-api" / "2026-09-28_120000"
+    assert saved.run_id == "2026-09-28_120000"
+    assert saved.run_dir == run_dir
+    assert saved.tests_dir == run_dir / "tests"
+    assert saved.manifest_path == run_dir / "manifest.json"
+    assert json.loads(saved.manifest_path.read_text(encoding="utf-8")) == saved.manifest
+
+    manifest = saved.manifest
+    assert manifest["schema_version"] == 1
+    assert manifest["created_at"] == "2026-09-28T12:00:00+07:00"
+    assert manifest["contract"] == {
+        "path": str(CONTRACT),
+        "sha256": hashlib.sha256(CONTRACT.read_bytes()).hexdigest(),
+        "title": "Demo Catalogue API",
+        "slug": "demo-catalogue-api",
+    }
+    assert manifest["generator"] == {"model": "deepseek", "meta": {"prompt": "v1"}}
+    stored = (saved.tests_dir / "test_catalogue.py").read_bytes()
+    assert manifest["files"] == [{
+        "name": "test_catalogue.py", "location": "tests",
+        "sha256": hashlib.sha256(stored).hexdigest(), "status": "ok",
+        "test_functions": 2, "warnings": [], "error": None,
+    }]
+    assert manifest["collection"]["status"] == "ok"
+    assert manifest["collection"]["nodeids"] == [
+        "test_catalogue.py::test_list", "test_catalogue.py::TestTags::test_tags",
+    ]
+    assert manifest["summary"] == {
+        "files_total": 1, "files_ok": 1, "files_no_tests": 0, "files_rejected": 0,
+        "test_functions": 2, "collected": 2,
+    }
+    assert sorted(p.name for p in run_dir.rglob("*")) == [
+        "manifest.json", "test_catalogue.py", "tests",
+    ]
+
+
+def test_save_moves_syntax_errors_to_rejected_and_collects_the_rest(tmp_path):
+    saved = save(tmp_path, ("test_good.py", GOOD), ("test_broken.py", "def test_a(:\n"))
+
+    assert (saved.run_dir / "rejected" / "test_broken.py").is_file()
+    assert not (saved.tests_dir / "test_broken.py").exists()
+    broken = next(f for f in saved.manifest["files"] if f["name"] == "test_broken.py")
+    assert broken["location"] == "rejected"
+    assert broken["status"] == "syntax_error"
+    assert broken["error"].startswith("line 1:")
+    assert saved.manifest["collection"]["status"] == "ok"
+    assert saved.manifest["summary"]["files_rejected"] == 1
+    assert saved.manifest["summary"]["collected"] == 2
+
+
+def test_save_records_import_errors_for_self_repair(tmp_path):
+    saved = save(tmp_path, ("test_a.py", "import nonexistent_module_xyz\n\ndef test_a():\n    pass\n"))
+
+    assert saved.manifest["collection"]["status"] == "errors"
+    assert "nonexistent_module_xyz" in saved.manifest["collection"]["errors"][0]
+
+
+def test_save_marks_file_without_tests(tmp_path):
+    saved = save(tmp_path, ("test_a.py", "X = 1\n"))
+
+    assert saved.manifest["files"][0]["status"] == "no_tests"
+    assert saved.manifest["collection"]["status"] == "no_tests"
+    assert saved.manifest["summary"]["files_no_tests"] == 1
+
+
+def test_save_skips_collection_when_disabled_or_nothing_parses(tmp_path):
+    disabled = save(tmp_path / "a", ("test_a.py", GOOD), collect=False)
+    assert disabled.manifest["collection"]["status"] == "skipped"
+    assert disabled.manifest["summary"]["collected"] is None
+
+    rejected_only = save(tmp_path / "b", ("test_a.py", "def test_a(:\n"))
+    assert rejected_only.manifest["collection"]["status"] == "skipped"
+    assert rejected_only.tests_dir.is_dir()
+    assert list(rejected_only.tests_dir.iterdir()) == []
+
+
+def test_save_never_overwrites_a_version_with_the_same_timestamp(tmp_path, monkeypatch):
+    from prototype.storage import store
+
+    monkeypatch.setattr(store, "_now", lambda: FIXED_TIME)
+    first = save(tmp_path, ("test_a.py", GOOD), collect=False)
+    before = {p: p.read_bytes() for p in first.run_dir.rglob("*") if p.is_file()}
+    second = save(tmp_path, ("test_a.py", "def test_other():\n    pass\n"), collect=False)
+    third = save(tmp_path, ("test_a.py", GOOD), collect=False)
+
+    assert (first.run_id, second.run_id, third.run_id) == (
+        "2026-09-28_120000", "2026-09-28_120000_2", "2026-09-28_120000_3",
+    )
+    assert {p: p.read_bytes() for p in first.run_dir.rglob("*") if p.is_file()} == before
+
+
+def test_save_timeout_is_recorded_with_top_level_warning(tmp_path):
+    saved = save(tmp_path, ("test_a.py", "import time\ntime.sleep(30)\n\ndef test_a():\n    pass\n"),
+                 collect_timeout_seconds=1)
+
+    assert saved.manifest["collection"]["status"] == "timeout"
+    assert saved.manifest["files"][0]["warnings"] == ["top_level_code"]
+    assert saved.manifest["summary"]["collected"] is None
+
+
+def test_save_normalizes_line_endings_and_bom(tmp_path):
+    saved = save(tmp_path, ("test_a.py", "﻿def test_a():\r\n    pass\r\n"))
+
+    stored = (saved.tests_dir / "test_a.py").read_bytes()
+    assert stored == b"def test_a():\n    pass\n"
+    assert saved.manifest["collection"]["status"] == "ok"
+
+
+def test_save_works_under_non_ascii_directories(tmp_path):
+    saved = save(tmp_path / "сохранено", ("test_a.py", GOOD))
+
+    assert saved.manifest["collection"]["status"] == "ok"
+    assert saved.manifest["collection"]["collected"] == 2
+
+
+def test_save_requires_existing_contract_and_creates_nothing(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        save(tmp_path / "out", ("test_a.py", GOOD), contract=tmp_path / "missing.yaml")
+    assert not (tmp_path / "out").exists()
+
+
+def test_save_cleans_up_when_interrupted(tmp_path, monkeypatch):
+    from prototype.storage import store
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("collector crashed")
+
+    monkeypatch.setattr(store, "collect_tests", boom)
+    with pytest.raises(RuntimeError, match="collector crashed"):
+        save(tmp_path, ("test_a.py", GOOD))
+    assert list((tmp_path / "demo-catalogue-api").iterdir()) == []
+
+
+def test_save_uses_env_output_root(tmp_path, monkeypatch):
+    from prototype.storage import GeneratedFile, SaveRequest, save_test_suite
+
+    monkeypatch.setenv("TESTGEN_OUTPUT_DIR", str(tmp_path / "from-env"))
+    saved = save_test_suite(SaveRequest(CONTRACT, (GeneratedFile("test_a.py", GOOD),), collect=False))
+    assert saved.run_dir.parent.parent == tmp_path / "from-env"
+
+
+def test_default_output_root_is_outside_the_package():
+    from prototype.storage.store import DEFAULT_OUTPUT_ROOT
+
+    assert DEFAULT_OUTPUT_ROOT == SOURCE_DIR.parent / "generated"
+
+
+@pytest.mark.parametrize("contract_text, expected_slug", [
+    ('{"openapi": "3.0.3", "info": {"title": "Orders API v2"}}', "orders-api-v2"),
+    ("openapi: 3.0.3\ninfo:\n  title: Каталог\n", "my-contract"),
+    ("openapi: 3.0.3\n", "my-contract"),
+    ("- just\n- a list\n", "my-contract"),
+    ("{not: [valid", "my-contract"),
+])
+def test_save_derives_slug_from_title_or_file_name(tmp_path, contract_text, expected_slug):
+    contract = tmp_path / "My_Contract.yaml"
+    contract.write_text(contract_text, encoding="utf-8")
+
+    saved = save(tmp_path / "out", ("test_a.py", GOOD), contract=contract, collect=False)
+    assert saved.manifest["contract"]["slug"] == expected_slug
+    assert saved.run_dir.parent.name == expected_slug
+
+
+@pytest.mark.parametrize("title, fallback, expected", [
+    ("Demo Catalogue API", "x", "demo-catalogue-api"),
+    ("  --Sock  Shop!!  ", "x", "sock-shop"),
+    ("", "", "contract"),
+    ("Каталог", "", "contract"),
+])
+def test_make_slug(title, fallback, expected):
+    from prototype.storage.store import make_slug
+
+    assert make_slug(title, fallback) == expected
+
+
+def test_make_slug_limits_length_without_trailing_dash():
+    from prototype.storage.store import make_slug
+
+    slug = make_slug("a" * 63 + " b", "x")
+    assert len(slug) <= 64
+    assert not slug.endswith("-")
