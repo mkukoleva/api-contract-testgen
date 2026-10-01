@@ -14,6 +14,7 @@ services:
       - api
       - database
       - host-access
+      - runner
     read_only: true
     cap_drop: [ALL]
     # /app carries cap_net_bind_service+ep; removing it from the bounding set
@@ -52,6 +53,10 @@ networks:
   api:
     internal: true
   database:
+    internal: true
+  # The test runner is attached only to this network, where the only
+  # container is catalogue. Nothing else is reachable from this network.
+  runner:
     internal: true
 
 volumes:

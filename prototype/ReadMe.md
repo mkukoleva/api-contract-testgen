@@ -78,7 +78,7 @@ HTTP-сервер на loopback. На этапе 1 проверено **38 те�
 
 ### Интерфейс pytest-runner — этап 1
 
-В `prototype.runner.contracts` доступны:
+В `prototype.service_tools.runner.contracts` доступны:
 
 - `RunConfig` — каталог тестов, каталог отчётов, адрес сервиса и таймаут.
 - `TestResult`, `TestOutcome` — результат отдельного тестового случая.
@@ -94,7 +94,7 @@ HTTP-сервер на loopback. На этапе 1 проверено **38 те�
 [ADR 0002](../docs/adr/0002-pytest-runner-contract.md).
 
 Для работы в PyCharm выберите интерпретатор `.venv/Scripts/python.exe`
-(Windows). Если IDE не видит локальный импорт `prototype.runner.contracts`,
+(Windows). Если IDE не видит локальный импорт `prototype.service_tools.runner.contracts`,
 отметьте каталог `src` как **Mark Directory as → Sources Root**.
 Устанавливать сторонние пакеты для этого импорта не требуется.
 
@@ -124,10 +124,10 @@ Runner принимает готовый каталог тестов и возв
 
 ```powershell
 # Один раз собрать образ; повторить после изменения Dockerfile или pytest_worker.py.
-docker build -t api-contract-pytest-runner:step3 src/prototype/runner
+docker build -t api-contract-pytest-runner:step3 src/prototype/service_tools/runner
 
 # Выполнить сохранённый пример: ожидаются completed, exit_code: 0, passed: 3.
-py -3.12 -m uv run --locked python -m prototype.runner ../benchmark/pytest-runner/example --output-dir .runner-results --timeout 30
+py -3.12 -m uv run --locked python -m prototype.service_tools.runner ../benchmark/pytest-runner/example --output-dir .runner-results --timeout 30
 ```
 
 Для своего набора замените путь примера каталогом с `test_*.py`. Внутри него
@@ -137,11 +137,12 @@ py -3.12 -m uv run --locked python -m prototype.runner ../benchmark/pytest-runne
 Каталог результатов должен быть отдельным, без вложенности в каталог тестов
 или наоборот. Пути с пробелами поддерживаются.
 
-В образе заранее установлены Python 3.14.7, pytest 9.1.1 и зависимости pytest.
-Другие библиотеки, включая `requests`, пока не включены. Установка пакетов и
-скачивание образа во время прогона отключены; отсутствие образа, Docker или
-нужного импорта возвращается как диагностируемая ошибка. Сеть нужна для сборки
-образа, но не для повторного запуска сохранённых тестов. LLM-токены не расходуются.
+В образе заранее установлены Python 3.14.7, pytest 9.1.1 с зависимостями и
+`requests` (для фикстур `api_client`). Другие библиотеки не включены. Установка
+пакетов и скачивание образа во время прогона отключены; отсутствие образа, Docker
+или нужного импорта возвращается как диагностируемая ошибка. Сеть нужна для
+сборки образа, но не для повторного запуска сохранённых тестов. LLM-токены не
+расходуются.
 
 CLI печатает JSON и возвращает код `0` только для завершённого прогона с кодом
 pytest `0`; падения, пустой набор, прерывание и ошибки возвращают код CLI `1`.
@@ -149,8 +150,8 @@ pytest `0`; падения, пустой набор, прерывание и о�
 содержать `failed` или `error`. В API:
 
 ```python
-from prototype.runner.contracts import RunConfig
-from prototype.runner.docker_runner import run_tests
+from prototype.service_tools.runner.contracts import RunConfig
+from prototype.service_tools.runner.docker_runner import run_tests
 
 result = run_tests(RunConfig(
     tests_dir="../benchmark/pytest-runner/example",
@@ -192,5 +193,54 @@ Remove-Item Env:RUN_RUNNER_DOCKER_TESTS
 `test_stress_large_contract_performance` в `test_mutation.py` превысила лимит
 2 секунды. Она падала и до изменений этапа 3; модуль мутаций не изменялся.
 
-На этапе 4 предстоит разрешить только адрес и порт Catalogue и проверить все
-оговорённые обходы сетевых ограничений. Полностью пункт 2.2.6 ещё не закрыт.
+### Сетевая изоляция до API — этап 4
+
+Этап 4 разрешает тестам доступ только к адресу и порту Catalogue. Стенд
+предоставляет отдельную internal-сеть `runner` (имя
+`pytest-runner-catalogue_runner`), в которой находится ровно один контейнер —
+Catalogue. Запуск против стенда происходит так:
+
+```powershell
+# Стенд должен быть поднят (см. benchmark/catalogue/README.md), образ собран:
+docker build -t api-contract-pytest-runner:step4 src/prototype/service_tools/runner
+
+py -3.12 -m uv run --locked python -m prototype.service_tools.runner <tests_dir> `
+  --output-dir .runner-results --timeout 60 `
+  --base-url http://catalogue:8080 `
+  --network pytest-runner-catalogue_runner `
+  --blocked-network pytest-runner-catalogue_database
+```
+
+- Preflight через `docker network inspect` подтверждает, что в сети runner ровно
+  один контейнер; иначе запуск не выполняется. Имя `catalogue` фиксируется в
+  hosts контейнера на фактический IPv4 (`--add-host`), поэтому `base_url` должен
+  быть обычным именем, а не IP.
+- `--blocked-network` (повторяемый) собирает IPv4 всех контейнеров сети —
+  обычно сети `database` — и вместе с gateway сети runner передаёт их в env
+  контейнера `RUNNER_UNREACHABLE`. Другие переменные: `RUNNER_BASE_URL`,
+  `RUNNER_API_IP`, `RUNNER_GATEWAY_IP`, `RUNNER_TIMEOUT_SECONDS`.
+- Worker сначала исполняет доверенный policy-набор `/opt/runner/policy_tests`
+  (health Catalogue, DNS pinned, недоступность интернета/host/базы/IPv6,
+  отказ внешнего DNS, запрет raw-socket, наследование ограничений дочерними
+  процессами, отказ следовать редиректам, отсутствие HTTP-proxy из среды).
+  Если policy-набор не подтвердил изоляцию, сгенерированные тесты не
+  запускаются, а результат — `infrastructure_error`. Это работает даже при
+  таймауте: обход сети — не повод продолжать.
+- В образ включаются `requests` и фикстуры `base_url`/`api_client` из
+  `fixtures.py` (`requests.Session` без proxy из среды, с HTTP-таймаутом и
+  отключённым следованием редиректам).
+- Offline-режим (`base_url=None`) не изменился и policy-набор не исполняет.
+
+Проверки этапа 4 (из `prototype`), без Docker дополнительно покрываются
+юнит-тестами парсинга сети, формирования аргументов `docker create` и чтения
+policy-событий; сценарии с реальным Docker — флагом `RUN_RUNNER_DOCKER_TESTS=1`.
+
+Ограничение этапа: `docker network inspect` — источник «единственного
+контейнера»; подтверждение изоляции перевыполняется при каждом прогоне до
+пользовательских тестов. Портовый фильтр на уровне Docker не используется:
+закрытие нецелевых адресов обеспечивает сеть runner и перепроверка policy.
+
+### Дальнейшие этапы
+
+Полностью пункт 2.2.6 ещё не закрыт: предстоит подключение runner к модулям
+команды (передача результатов, self-repair, метрики) и полные отчёты этапа 6.

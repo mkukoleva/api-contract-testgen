@@ -26,9 +26,9 @@ def isolated_python(code):
 
 def test_runner_import_works_without_llm_or_third_party_packages():
     result = isolated_python(
-        "import prototype.runner.contracts; "
+        "import prototype.service_tools.runner.contracts; "
         "assert 'prototype.llm.model' not in sys.modules; "
-        "assert 'prototype.runner.tools' not in sys.modules"
+        "assert 'prototype.service_tools.runner.tools' not in sys.modules"
     )
     assert result.returncode == 0, result.stderr
 
@@ -53,12 +53,12 @@ def test_existing_agent_keeps_its_model_prompt_and_four_tools(monkeypatch):
     agents.create_agent = lambda **kwargs: SimpleNamespace(**kwargs)
     llm = ModuleType("prototype.llm.model")
     llm.build_model = lambda: model
-    tools = ModuleType("prototype.runner.tools")
+    tools = ModuleType("prototype.service_tools.runner.tools")
     for name in tool_names:
         setattr(tools, name, object())
     for name, module in (("langchain.agents", agents),
                          ("prototype.llm.model", llm),
-                         ("prototype.runner.tools", tools)):
+                         ("prototype.service_tools.runner.tools", tools)):
         monkeypatch.setitem(sys.modules, name, module)
 
     agent = prototype.build_agent()
@@ -78,7 +78,7 @@ def test_cli_still_passes_contract_to_run(monkeypatch):
 
 
 def test_config_accepts_paths_without_creating_directories(tmp_path):
-    from prototype.runner.contracts import RunConfig
+    from prototype.service_tools.runner.contracts import RunConfig
 
     config = RunConfig(
         tests_dir=str(tmp_path / "tests"), output_dir=tmp_path / "reports",
@@ -93,7 +93,7 @@ def test_config_accepts_paths_without_creating_directories(tmp_path):
 
 @pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), True, "30"])
 def test_config_rejects_invalid_time_budget(timeout):
-    from prototype.runner.contracts import RunConfig
+    from prototype.service_tools.runner.contracts import RunConfig
 
     with pytest.raises(ValueError, match="timeout_seconds"):
         RunConfig("tests", "reports", timeout_seconds=timeout)
@@ -106,7 +106,7 @@ def test_config_rejects_invalid_time_budget(timeout):
     "http://cat alogue", "\nhttp://catalogue", "http://catalogue\\other",
 ])
 def test_config_rejects_invalid_or_ambiguous_target(url):
-    from prototype.runner.contracts import RunConfig
+    from prototype.service_tools.runner.contracts import RunConfig
 
     with pytest.raises(ValueError, match="base_url"):
         RunConfig("tests", "reports", base_url=url)
@@ -114,14 +114,14 @@ def test_config_rejects_invalid_or_ambiguous_target(url):
 
 @pytest.mark.parametrize("url", [None, "http://catalogue:80", "https://localhost/api", "http://[::1]:8080"])
 def test_config_supports_unit_mode_and_http_targets(url):
-    from prototype.runner.contracts import RunConfig
+    from prototype.service_tools.runner.contracts import RunConfig
 
     assert RunConfig("tests", "reports", base_url=url).base_url == url
 
 
 @pytest.mark.parametrize("field", ["tests_dir", "output_dir"])
 def test_config_rejects_empty_paths(field):
-    from prototype.runner.contracts import RunConfig
+    from prototype.service_tools.runner.contracts import RunConfig
 
     args = {"tests_dir": "tests", "output_dir": "reports", field: " "}
     with pytest.raises(ValueError, match=field):
@@ -129,7 +129,7 @@ def test_config_rejects_empty_paths(field):
 
 
 def test_result_json_distinguishes_assertion_failure_from_infrastructure_error():
-    from prototype.runner.contracts import RunResult, RunStatus, TestResult
+    from prototype.service_tools.runner.contracts import RunResult, RunStatus, TestResult
 
     completed = RunResult(
         status=RunStatus.COMPLETED, exit_code=1, duration_seconds=0.5,
@@ -153,7 +153,7 @@ def test_result_json_distinguishes_assertion_failure_from_infrastructure_error()
 
 @pytest.mark.parametrize("status", ["collection_error", "timeout", "no_tests", "interrupted"])
 def test_incomplete_runs_keep_diagnostics(status):
-    from prototype.runner.contracts import RunResult
+    from prototype.service_tools.runner.contracts import RunResult
 
     result = RunResult(status, None, 1, collection_errors=("test_bad.py: SyntaxError",))
     assert result.to_dict()["status"] == status
@@ -161,7 +161,7 @@ def test_incomplete_runs_keep_diagnostics(status):
 
 
 def test_result_rejects_unknown_status_and_invalid_duration():
-    from prototype.runner.contracts import RunResult, TestResult
+    from prototype.service_tools.runner.contracts import RunResult, TestResult
 
     with pytest.raises(ValueError):
         RunResult("success-ish", 0, 1)
@@ -177,7 +177,7 @@ def test_result_rejects_unknown_status_and_invalid_duration():
 
 
 def test_results_reject_empty_and_duplicate_test_identifiers():
-    from prototype.runner.contracts import RunResult, TestResult
+    from prototype.service_tools.runner.contracts import RunResult, TestResult
 
     with pytest.raises(ValueError, match="nodeid"):
         TestResult(" ", "passed")
