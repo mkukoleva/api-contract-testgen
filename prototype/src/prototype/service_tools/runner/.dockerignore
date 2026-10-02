@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!pytest_worker.py
+!fixtures.py
+!policy_tests/
+!policy_tests/*

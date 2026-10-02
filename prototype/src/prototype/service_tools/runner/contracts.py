@@ -30,6 +30,14 @@ class TestOutcome(StrEnum):
     SKIPPED = "skipped"
 
 
+class IssueCategory(StrEnum):
+    """Kind of pytest compatibility problem found before or at collection."""
+
+    SYNTAX = "syntax"
+    IMPORT = "import"
+    COLLECTION = "collection"
+
+
 def _validate_seconds(value: float, name: str, *, positive: bool = False) -> None:
     if (
         isinstance(value, bool)
@@ -117,6 +125,48 @@ class TestResult:
 
 
 @dataclass(frozen=True)
+class CompatibilityIssue:
+    """A pytest compatibility problem with its exact cause.
+
+    The host-side precheck produces ``syntax`` issues without executing any
+    code; the in-isolation collection phase can later surface import or
+    collection problems through collection_errors. ``auto_fixable`` marks the
+    conservative set of obvious fixes that are handed to the post-processing
+    module.
+    """
+
+    category: IssueCategory | str
+    path: str
+    message: str
+    line: int | None = None
+    column: int | None = None
+    auto_fixable: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "category", IssueCategory(self.category))
+        if not isinstance(self.path, str) or not self.path.strip():
+            raise ValueError("path must be a non-empty string")
+        if not isinstance(self.message, str) or not self.message.strip():
+            raise ValueError("message must be a non-empty string")
+        for name in ("line", "column"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, int) or value < 0):
+                raise ValueError(f"{name} must be a non-negative integer or None")
+        if not isinstance(self.auto_fixable, bool):
+            raise ValueError("auto_fixable must be a bool")
+
+    def to_dict(self) -> dict:
+        return {
+            "category": self.category.value,
+            "path": self.path,
+            "line": self.line,
+            "column": self.column,
+            "message": self.message,
+            "auto_fixable": self.auto_fixable,
+        }
+
+
+@dataclass(frozen=True)
 class RunResult:
     """Structured output; completed does not mean all assertions passed.
 
@@ -129,6 +179,7 @@ class RunResult:
     duration_seconds: float
     tests: tuple[TestResult, ...] = ()
     collection_errors: tuple[str, ...] = ()
+    compatibility_issues: tuple[CompatibilityIssue, ...] = ()
     error_message: str | None = None
     report_paths: dict[str, Path | str] = field(default_factory=dict)
 
@@ -136,6 +187,12 @@ class RunResult:
         object.__setattr__(self, "status", RunStatus(self.status))
         object.__setattr__(self, "tests", tuple(self.tests))
         object.__setattr__(self, "collection_errors", tuple(self.collection_errors))
+        object.__setattr__(self, "compatibility_issues",
+                           tuple(self.compatibility_issues))
+        for issue in self.compatibility_issues:
+            if not isinstance(issue, CompatibilityIssue):
+                raise ValueError(
+                    "compatibility_issues must contain CompatibilityIssue items")
         _validate_seconds(self.duration_seconds, "duration_seconds")
         nodeids = [test.nodeid for test in self.tests]
         if len(nodeids) != len(set(nodeids)):
@@ -162,6 +219,9 @@ class RunResult:
                 for test in self.tests
             ],
             "collection_errors": list(self.collection_errors),
+            "compatibility_issues": [
+                issue.to_dict() for issue in self.compatibility_issues
+            ],
             "error_message": self.error_message,
             "report_paths": {name: str(path) for name, path in self.report_paths.items()},
         }

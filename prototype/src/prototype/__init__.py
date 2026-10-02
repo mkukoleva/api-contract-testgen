@@ -79,7 +79,7 @@ def build_agent():
     from langchain.agents import create_agent
 
     from .llm.model import build_model
-    from .runner.tools import (
+    from .service_tools.runner.tools import (
         demo_api_test_tool,
         generate_user_story_tool,
         schemathesis_tool,
