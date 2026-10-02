@@ -17,7 +17,7 @@ RUNNER_DIR = Path(__file__).resolve().parents[1] / "service_tools" / "runner"
 SRC_DIR = Path(__file__).resolve().parents[2]
 DOCKER = pytest.mark.skipif(
     os.environ.get("RUN_RUNNER_DOCKER_TESTS") != "1",
-    reason="requires Docker and the prebuilt api-contract-pytest-runner:step4 image",
+    reason="requires Docker and the prebuilt api-contract-pytest-runner:step5 image",
 )
 
 
@@ -68,12 +68,15 @@ def test_real_pytest_results(tmp_path, source, status, code, counts):
     # This host subprocess runs only the literal infrastructure fixtures above.
     suite = make_suite(tmp_path, source)
     events = tmp_path / "events.jsonl"
+    collect_events = tmp_path / "collect_events.jsonl"
     proc = subprocess.run(
-        [sys.executable, "-B", str(RUNNER_DIR / "pytest_worker.py"), str(suite), str(events)],
+        [sys.executable, "-B", str(RUNNER_DIR / "pytest_worker.py"),
+         str(suite), str(events), str(collect_events)],
         capture_output=True, text=True, timeout=15,
     )
     assert proc.returncode == code, proc.stdout + proc.stderr
-    result = backend().read_result(events, 0.1)
+    collect_ok, collect_result = backend().read_collection(collect_events, 0.1)
+    result = collect_result if not collect_ok else backend().read_result(events, 0.1)
     assert result.status == status
     assert result.exit_code == code
     summary = result.to_dict()["summary"]
@@ -100,12 +103,15 @@ def test_missing_event_file_is_not_success(tmp_path):
 def test_abrupt_exit_does_not_report_success(tmp_path, source):
     suite = make_suite(tmp_path, source)
     events = tmp_path / "events.jsonl"
+    collect_events = tmp_path / "collect_events.jsonl"
     proc = subprocess.run(
-        [sys.executable, "-B", str(RUNNER_DIR / "pytest_worker.py"), str(suite), str(events)],
+        [sys.executable, "-B", str(RUNNER_DIR / "pytest_worker.py"),
+         str(suite), str(events), str(collect_events)],
         capture_output=True, text=True, timeout=15,
     )
     assert proc.returncode == 0
-    result = backend().read_result(events, 0.1)
+    collect_ok, collect_result = backend().read_collection(collect_events, 0.1)
+    result = collect_result if not collect_ok else backend().read_result(events, 0.1)
     assert result.status == "infrastructure_error"
     assert result.exit_code is None
     assert not result.tests
@@ -122,22 +128,26 @@ def _make_policy_suite(tmp_path, *, passes):
     return policy
 
 
-def _run_worker_4args(tmp_path, policy_pass):
+def _run_worker_5args(tmp_path, policy_pass):
     policy = _make_policy_suite(tmp_path, passes=policy_pass)
     tests = make_suite(tmp_path, "def test_user(): assert True")
     policy_events = tmp_path / "policy_events.jsonl"
     events = tmp_path / "events.jsonl"
+    collect_events = tmp_path / "collect_events.jsonl"
     proc = subprocess.run(
         [sys.executable, "-B", str(RUNNER_DIR / "pytest_worker.py"),
-         str(policy), str(tests), str(policy_events), str(events)],
+         str(policy), str(tests), str(policy_events), str(events),
+         str(collect_events)],
         capture_output=True, text=True, timeout=15,
     )
-    return proc, policy_events, events
+    return proc, policy_events, events, collect_events
 
 
 def test_worker_runs_user_tests_after_passing_policy(tmp_path):
-    proc, policy_events, events = _run_worker_4args(tmp_path, policy_pass=True)
+    proc, policy_events, events, collect_events = _run_worker_5args(tmp_path, policy_pass=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+    collect_ok, collect_result = backend().read_collection(collect_events, 0.1)
+    assert collect_ok, collect_result
     result = backend().read_result(events, 0.1)
     assert result.status == "completed"
     assert result.tests[0].nodeid.endswith("test_user")
@@ -146,10 +156,11 @@ def test_worker_runs_user_tests_after_passing_policy(tmp_path):
 
 
 def test_worker_skips_user_tests_when_policy_fails(tmp_path):
-    proc, policy_events, events = _run_worker_4args(tmp_path, policy_pass=False)
+    proc, policy_events, events, collect_events = _run_worker_5args(tmp_path, policy_pass=False)
     assert proc.returncode != 0
     # User tests must not even be collected once the isolation leak is found.
     assert not events.exists(), "user events must not exist after a policy failure"
+    assert not collect_events.exists(), "collection must not run after a policy failure"
     policy_ok, message = backend().read_policy_result(policy_events)
     assert policy_ok is False
     assert any(sub in message for sub in ("blocked", "not passed"))
@@ -159,11 +170,11 @@ def test_worker_rejects_wrong_argument_count(tmp_path):
     suite = make_suite(tmp_path, "def test_ok(): pass")
     proc = subprocess.run(
         [sys.executable, "-B", str(RUNNER_DIR / "pytest_worker.py"),
-         str(suite), str(tmp_path / "a.jsonl"), "extra"],
+         str(suite), str(tmp_path / "a.jsonl")],
         capture_output=True, text=True, timeout=15,
     )
     assert proc.returncode != 0
-    assert "expected" in proc.stdout + proc.stderr
+    assert "expected" in (proc.stdout + proc.stderr).lower()
 
 
 def test_cli_failure_returns_json_without_llm(tmp_path):
@@ -223,6 +234,40 @@ def test_docker_lifecycle(tmp_path, source, status, code):
     assert result.status == status, result.to_dict()
     assert result.exit_code == code
     assert Path(result.report_paths["log"]).is_file()
+
+
+@DOCKER
+def test_docker_runs_clean_example_unchanged(tmp_path):
+    example = Path(__file__).resolve().parents[4] / "benchmark" / "pytest-runner" / "example"
+    if not example.is_dir():
+        pytest.skip("benchmark example suite not present")
+    result = backend().run_tests(RunConfig(example, tmp_path / "out", timeout_seconds=30))
+    assert result.status == "completed", result.to_dict()
+    assert result.exit_code == 0
+    assert result.to_dict()["summary"]["passed"] == 3
+    # The example runs through the two-phase pipeline without manual edits.
+    assert Path(result.report_paths["collect_events"]).is_file()
+
+
+@DOCKER
+def test_docker_collect_phase_runs_in_isolation(tmp_path):
+    # The import happens during pytest --collect-only, which imports Python
+    # modules; writing to the read-only /tests mount must fail right there,
+    # before any test body executes, inside the same isolation.
+    suite = make_suite(tmp_path, """
+        import os
+        open('/tests/collect-write', 'w').close()
+        def test_never_runs(): pass
+    """)
+    result = backend().run_tests(RunConfig(suite, tmp_path / "out", timeout_seconds=30))
+    assert result.status == "collection_error", result.to_dict()
+    assert result.collection_errors
+    assert not result.tests, "test bodies must not run after a collection error"
+    assert not (suite / "collect-write").exists()
+    assert Path(result.report_paths["collect_events"]).is_file()
+    # The single-phase run event file never appears: collection stopped the
+    # run before any test phase began.
+    assert "events" not in result.report_paths
 
 
 @DOCKER
@@ -354,7 +399,8 @@ def test_docker_create_args_offline_vs_service(tmp_path, monkeypatch):
     assert "--network" in offline
     assert offline[offline.index("--network") + 1] == "none"
     assert "--env" not in offline
-    assert offline[-3:] == ["img", "/tests", "/results/events.jsonl"]
+    assert offline[-4:] == ["img", "/tests", "/results/events.jsonl",
+                            "/results/collect_events.jsonl"]
 
     service = docker_runner._docker_create_args(
         config=RunConfig(tmp_path / "tests", tmp_path / "out",
@@ -371,8 +417,9 @@ def test_docker_create_args_offline_vs_service(tmp_path, monkeypatch):
     assert "RUNNER_UNREACHABLE=172.28.0.1,172.29.0.9" in service
     # gateway goes first into RUNNER_UNREACHABLE at runtime, but the helper
     # receives the final list; assert the policy fixtures become identical.
-    assert service[-5:] == ["img", "/opt/runner/policy_tests", "/tests",
-                            "/results/policy_events.jsonl", "/results/events.jsonl"]
+    assert service[-6:] == ["img", "/opt/runner/policy_tests", "/tests",
+                            "/results/policy_events.jsonl", "/results/events.jsonl",
+                            "/results/collect_events.jsonl"]
 
 
 def test_service_mode_without_docker_returns_infrastructure_error(tmp_path, monkeypatch):

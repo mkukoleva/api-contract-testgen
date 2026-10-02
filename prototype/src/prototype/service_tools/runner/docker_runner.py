@@ -4,6 +4,12 @@ Step 4 adds the service network policy: with a base_url and a runner network,
 the container is attached only to that network, the target DNS name is pinned
 into /etc/hosts via --add-host, and a trusted policy suite must confirm the
 isolation before the generated tests are allowed to run.
+
+Step 5 adds the automatic pytest compatibility check. A host-side syntax
+precheck (ast.parse, no execution, no Docker) is a hard gate. Inside the
+container the worker runs a pytest --collect-only pass first: it imports the
+Python modules, so it must run in the same isolation, and any collection
+error stops the run before a single test body executes.
 """
 
 from dataclasses import replace
@@ -15,10 +21,17 @@ import time
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from .contracts import RunConfig, RunResult, RunStatus, TestResult
+from .compat import precheck_syntax
+from .contracts import (
+    CompatibilityIssue,
+    RunConfig,
+    RunResult,
+    RunStatus,
+    TestResult,
+)
 
 
-DEFAULT_IMAGE = "api-contract-pytest-runner:step4"
+DEFAULT_IMAGE = "api-contract-pytest-runner:step5"
 CONTROL_TIMEOUT = 10
 MAX_EVENTS_BYTES = 8 * 1024 * 1024
 
@@ -27,6 +40,7 @@ POLICY_DIR = "/opt/runner/policy_tests"
 TESTS_DIR = "/tests"
 EVENTS_PATH = "/results/events.jsonl"
 POLICY_EVENTS_PATH = "/results/policy_events.jsonl"
+COLLECT_EVENTS_PATH = "/results/collect_events.jsonl"
 
 _ALLOWED_HOSTNAME_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
@@ -108,6 +122,67 @@ def read_result(events_path: Path, duration_seconds: float) -> RunResult:
         error = "pytest did not finish" if exit_code is None else f"pytest internal/usage error ({exit_code})"
     return RunResult(status, exit_code, duration_seconds, tests=tuple(tests),
                      collection_errors=tuple(collection_errors), error_message=error)
+
+
+def read_collection(collect_events_path: Path, duration_seconds: float) -> tuple[bool, RunResult | None]:
+    """Inspect the in-isolation collect-only phase. Returns (ok, failure_result).
+
+    A successful collection returns (True, None); the actual test run is read
+    separately. Any collection error, interruption, zero collected tests, or a
+    missing finish event is a failure whose RunResult carries the exact cause.
+    This phase imports Python modules and must therefore already have run
+    inside the same isolation as the tests themselves.
+    """
+    collection_errors = []
+    exit_code = None
+    interruption = None
+    try:
+        if collect_events_path.stat().st_size > MAX_EVENTS_BYTES:
+            raise ValueError("collect event file exceeds 8 MiB")
+        with collect_events_path.open(encoding="utf-8") as stream:
+            for line in stream:
+                if not line.endswith("\n"):
+                    break  # A forced kill can interrupt the last write.
+                event = json.loads(line)
+                kind = event["kind"]
+                if kind == "collection_error":
+                    collection_errors.append(event["message"])
+                elif kind == "interrupted":
+                    interruption = event["message"] or "pytest collection interrupted"
+                elif kind == "finish":
+                    exit_code = event["exit_code"]
+                    if type(exit_code) is not int or exit_code not in range(6):
+                        raise ValueError("invalid pytest exit code")
+                elif kind != "start":
+                    raise ValueError("unknown collect event")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return False, RunResult("infrastructure_error", None, duration_seconds,
+                                error_message=f"Cannot read collect events: {exc}")
+    if exit_code is None:
+        return False, RunResult("infrastructure_error", None, duration_seconds,
+                                error_message="pytest collection did not finish")
+    if collection_errors:
+        return False, RunResult("collection_error", exit_code, duration_seconds,
+                                collection_errors=tuple(collection_errors))
+    if interruption:
+        return False, RunResult("interrupted", exit_code, duration_seconds,
+                                error_message=interruption)
+    if exit_code == 5:
+        return False, RunResult("no_tests", exit_code, duration_seconds)
+    if exit_code != 0:
+        return False, RunResult(
+            "collection_error", exit_code, duration_seconds,
+            collection_errors=(f"pytest collection exited with code {exit_code}",))
+    return True, None
+
+
+def _format_issue(issue: CompatibilityIssue) -> str:
+    location = issue.path
+    if issue.line is not None:
+        location += f":{issue.line}"
+        if issue.column is not None:
+            location += f":{issue.column}"
+    return f"{location}: {issue.message}"
 
 
 def read_policy_result(policy_events_path: Path) -> tuple[bool, str]:
@@ -251,9 +326,10 @@ def _docker_create_args(
             "--env", f"RUNNER_TIMEOUT_SECONDS={config.timeout_seconds:g}",
         ]
     if network is None:
-        args += [image, TESTS_DIR, EVENTS_PATH]
+        args += [image, TESTS_DIR, EVENTS_PATH, COLLECT_EVENTS_PATH]
     else:
-        args += [image, POLICY_DIR, TESTS_DIR, POLICY_EVENTS_PATH, EVENTS_PATH]
+        args += [image, POLICY_DIR, TESTS_DIR, POLICY_EVENTS_PATH,
+                 EVENTS_PATH, COLLECT_EVENTS_PATH]
     return args
 
 
@@ -265,6 +341,13 @@ def run_tests(
     blocked_networks: tuple[str, ...] = (),
 ) -> RunResult:
     """Run a prepared suite in a fresh container; image is chosen by the caller.
+
+    A host-side syntax precheck (ast.parse, no code execution) is a hard gate:
+    broken Python stops the run before Docker is even called, with an exact
+    path:line:column cause in collection_errors and compatibility_issues.
+    Inside the container the worker runs pytest --collect-only first (it
+    imports the Python modules, so it must run in the same isolation), then
+    the tests; a collection error stops the run before any test body executes.
 
     base_url=None requests an offline run (--network none). A base_url
     requires the name of the runner network that already contains exactly one
@@ -287,6 +370,7 @@ def run_tests(
     error = None
     cleanup_error = None
     events_path = None
+    collect_events_path = None
     policy_events_path = None
     try:
         if service:
@@ -315,8 +399,28 @@ def run_tests(
         events_path = run_dir / "events.jsonl"
         log_path = run_dir / "pytest.log"
         policy_events_path = run_dir / "policy_events.jsonl"
+        collect_events_path = run_dir / "collect_events.jsonl"
         paths = {"events": events_path, "log": log_path,
-                 "policy_events": policy_events_path}
+                 "policy_events": policy_events_path,
+                 "collect_events": collect_events_path}
+
+        # Hard gate: parse every Python file without executing it. A broken
+        # file reports an exact cause and Docker is never invoked.
+        issues = precheck_syntax(tests_dir)
+        if issues:
+            precheck_path = run_dir / "precheck.json"
+            precheck_path.write_text(
+                json.dumps([issue.to_dict() for issue in issues],
+                           ensure_ascii=True, allow_nan=False),
+                encoding="utf-8")
+            paths["precheck"] = precheck_path
+            return RunResult(
+                RunStatus.COLLECTION_ERROR, None, time.monotonic() - start,
+                collection_errors=tuple(_format_issue(issue) for issue in issues),
+                compatibility_issues=issues,
+                report_paths={key: path for key, path in paths.items()
+                              if path.is_file()},
+            )
 
         def remaining():
             return max(0.001, config.timeout_seconds - (time.monotonic() - start))
@@ -357,8 +461,14 @@ def run_tests(
                 cleanup_error = str(exc)
 
     duration = time.monotonic() - start
-    result = read_result(events_path, duration) if events_path else RunResult(
-        "infrastructure_error", None, duration)
+    if collect_events_path is not None:
+        collect_ok, collect_result = read_collection(collect_events_path, duration)
+        result = collect_result if not collect_ok else (
+            read_result(events_path, duration) if events_path else RunResult(
+                "infrastructure_error", None, duration))
+    else:  # pragma: no cover - the host always uses the two-phase worker form
+        result = read_result(events_path, duration) if events_path else RunResult(
+            "infrastructure_error", None, duration)
     if override:
         result = replace(result, status=override, error_message=error)
     if service and policy_events_path is not None and policy_events_path.is_file():

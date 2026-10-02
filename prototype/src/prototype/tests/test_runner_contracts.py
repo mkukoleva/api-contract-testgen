@@ -27,6 +27,8 @@ def isolated_python(code):
 def test_runner_import_works_without_llm_or_third_party_packages():
     result = isolated_python(
         "import prototype.service_tools.runner.contracts; "
+        "import prototype.service_tools.runner.compat; "
+        "from prototype.service_tools.runner.compat import precheck_syntax; "
         "assert 'prototype.llm.model' not in sys.modules; "
         "assert 'prototype.service_tools.runner.tools' not in sys.modules"
     )

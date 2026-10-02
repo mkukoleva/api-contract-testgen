@@ -193,6 +193,43 @@ Remove-Item Env:RUN_RUNNER_DOCKER_TESTS
 `test_stress_large_contract_performance` в `test_mutation.py` превысила лимит
 2 секунды. Она падала и до изменений этапа 3; модуль мутаций не изменялся.
 
+### Автоматическая проверка совместимости pytest — этап 5
+
+Перед каждым запуском runner проверяет, что набор действительно совместим
+с pytest, тремя стадиями:
+
+1. **Проверка синтаксиса без исполнения кода** — на хосте, до Docker.
+   Каждый `*.py` в каталоге тестов разбирается через `ast.parse`;
+   контейнер при ошибке не создаётся. Точная причина — `path:line:column`.
+   Это жёсткий барьер: `collection_error` + структурированные
+   `compatibility_issues` + артефакт `precheck.json`.
+2. **Сбор в изоляции** — worker запускает `pytest --collect-only` внутри
+   того же контейнера и сетевой политики (в service-режиме после policy-
+   набора). Сбор импортирует Python-модули, поэтому выполняется только
+   в изоляции; ошибки импорта записываются в `collect_events.jsonl`.
+3. **Запуск** — тела тестов выполняются только после успешного сбора.
+
+Очевидные исправления (`auto_fixable=True` в `compatibility_issues`)
+передаются модулю постобработки; сам модуль и применение фиксов —
+следующий этап. Корректные файлы (в том числе
+`../benchmark/pytest-runner/example`) проходят конвейер без ручных правок;
+некорректные дают понятный результат (`error`-статус, точная причина).
+
+Образ пересобирается после изменения worker:
+
+```bash
+docker build -t api-contract-pytest-runner:step5 src/prototype/service_tools/runner
+```
+
+Проверки этапа 5 (из `prototype`), как и раньше:
+
+```bash
+.venv/bin/python -m pytest src/prototype/tests/test_pytest_compat.py -q
+.venv/bin/python -m pytest src/prototype/tests/test_pytest_runner.py -q
+# Полная проверка runner с заранее собранным образом step5:
+RUN_RUNNER_DOCKER_TESTS=1 .venv/bin/python -m pytest src/prototype/tests/test_pytest_runner.py -q
+```
+
 ### Сетевая изоляция до API — этап 4
 
 Этап 4 разрешает тестам доступ только к адресу и порту Catalogue. Стенд
@@ -202,7 +239,7 @@ Catalogue. Запуск против стенда происходит так:
 
 ```powershell
 # Стенд должен быть поднят (см. benchmark/catalogue/README.md), образ собран:
-docker build -t api-contract-pytest-runner:step4 src/prototype/service_tools/runner
+docker build -t api-contract-pytest-runner:step5 src/prototype/service_tools/runner
 
 py -3.12 -m uv run --locked python -m prototype.service_tools.runner <tests_dir> `
   --output-dir .runner-results --timeout 60 `
@@ -244,3 +281,6 @@ policy-событий; сценарии с реальным Docker — флаг�
 
 Полностью пункт 2.2.6 ещё не закрыт: предстоит подключение runner к модулям
 команды (передача результатов, self-repair, метрики) и полные отчёты этапа 6.
+Проверка совместимости pytest реализована (этап 5): host-precheck синтаксиса
+и `pytest --collect-only` в изоляции; модуль постобработки с применением
+помеченных `auto_fixable` исправлений — следующий этап.

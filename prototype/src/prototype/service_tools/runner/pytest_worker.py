@@ -3,11 +3,15 @@
 This file is copied into the runner image without the agent or its dependencies.
 Only controlled infrastructure tests invoke it directly on the host.
 
+The worker runs three trusted phases inside the same isolation:
+  1. (service mode only) the policy suite that proves network isolation;
+  2. a pytest --collect-only pass that imports the test modules and records
+     exact collection errors without executing any test bodies;
+  3. the generated tests, only when collection succeeded.
+
 Arguments:
-  1. policy suite directory (or "offline" when no service is available)
-  2. generated tests directory
-  3. policy events JSONL path (only in service mode)
-  4. generated tests events JSONL path
+  offline: TESTS_DIR EVENTS COLLECT_EVENTS
+  service: POLICY_DIR TESTS_DIR POLICY_EVENTS EVENTS COLLECT_EVENTS
 """
 
 import json
@@ -40,7 +44,7 @@ class EventReporter:
         )
 
 
-def _run_pytest(suite_dir: str, events_path: str, plugins) -> int:
+def _run_pytest(suite_dir: str, events_path: str, plugins, *, collect_only=False) -> int:
     os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     for name in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
         os.environ.pop(name, None)
@@ -49,22 +53,26 @@ def _run_pytest(suite_dir: str, events_path: str, plugins) -> int:
     suite_dir = str(Path(suite_dir).resolve(strict=True))
     events_path = str(Path(events_path).resolve())
     os.chdir(suite_dir)
+    args = [
+        suite_dir, "-q", "-c", os.devnull,
+        "--rootdir", suite_dir, "--confcutdir", suite_dir,
+        "-p", "no:cacheprovider", "--tb=short",
+    ]
+    if collect_only:
+        # --collect-only imports the modules but never runs test bodies.
+        args.append("--collect-only")
     with open(events_path, "w", encoding="utf-8") as stream:
         reporter = EventReporter(stream)
         reporter.emit("start", version=1)
-        code = int(pytest.main([
-            suite_dir, "-q", "-c", os.devnull,
-            "--rootdir", suite_dir, "--confcutdir", suite_dir,
-            "-p", "no:cacheprovider", "--tb=short",
-        ], plugins=[reporter, *plugins]))
+        code = int(pytest.main(args, plugins=[reporter, *plugins]))
         reporter.emit("finish", exit_code=code)
     return code
 
 
 def main(argv=None):
     args = argv if argv is not None else sys.argv[1:]
-    if len(args) == 4:
-        policy_dir, tests_dir, policy_events, events_path = args
+    if len(args) == 5:
+        policy_dir, tests_dir, policy_events, events_path, collect_events_path = args
         plugins = _policy_plugins()
         policy_code = _run_pytest(policy_dir, policy_events, plugins)
         if policy_code != 0:
@@ -73,13 +81,22 @@ def main(argv=None):
                 stream.write(json.dumps({"kind": "policy_blocked",
                                          "exit_code": policy_code}) + "\n")
             return policy_code
+        collect_code = _run_pytest(tests_dir, collect_events_path,
+                                   plugins, collect_only=True)
+        if collect_code != 0:
+            # Collection (import) problems stop the run before any test body.
+            return collect_code
         return _run_pytest(tests_dir, events_path, plugins)
-    if len(args) == 2:
-        tests_dir, events_path = args
+    if len(args) == 3:
+        tests_dir, events_path, collect_events_path = args
+        collect_code = _run_pytest(tests_dir, collect_events_path,
+                                   [], collect_only=True)
+        if collect_code != 0:
+            return collect_code
         return _run_pytest(tests_dir, events_path, [])
     raise SystemExit(
-        "expected POLICY_DIR TESTS_DIR POLICY_EVENTS EVENTS "
-        "or TESTS_DIR EVENTS")
+        "expected POLICY_DIR TESTS_DIR POLICY_EVENTS EVENTS COLLECT_EVENTS "
+        "or TESTS_DIR EVENTS COLLECT_EVENTS")
 
 
 def _policy_plugins():
