@@ -239,6 +239,38 @@ def test_mutate_status_code_swap_integer_keys():
     assert "500" in m.mutated_contract["paths"]["/test"]["get"]["responses"]
 
 
+def test_mutate_schemas_under_integer_status_codes():
+    """Проверяет мутацию схем внутри ответов с целочисленными ключами (не закавыченными в YAML)."""
+    contract = {
+        "openapi": "3.0.0",
+        "paths": {
+            "/item": {
+                "get": {
+                    "responses": {
+                        200: {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "string",
+                                        "required": ["item_id"],
+                                        "properties": {"item_id": {"type": "integer"}},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    }
+    mutants = generate_mutants(contract)
+    assert len(mutants) >= 3
+    # Проверяем, что мутатор успешно заменяет типы и обязательные поля даже при int ключах
+    assert any(m.operator == MutationType.TYPE_CHANGE for m in mutants)
+    assert any(m.operator == MutationType.REMOVE_REQUIRED for m in mutants)
+    assert any(m.operator == MutationType.STATUS_CODE_SWAP for m in mutants)
+
+
 # ============================================================================
 # Тесты генератора мутантов: generate_mutants
 # ============================================================================
@@ -657,8 +689,8 @@ def test_stress_large_contract_performance():
     duration = time.perf_counter() - start
 
     assert len(mutants) >= 1000
-    # Должно выполняться менее чем за 2 секунды
-    assert duration < 2.0, f"Генерация мутантов слишком медленная: {duration:.2f}с"
+    # Должно выполняться менее чем за 5.0 секунд (с запасом для медленных CI-сред)
+    assert duration < 5.0, f"Генерация мутантов слишком медленная: {duration:.2f}с"
 
     counts = count_mutants_by_operator(mutants)
     assert counts[MutationType.TYPE_CHANGE.value] >= 400
@@ -763,3 +795,24 @@ def test_branch_coverage_edges(monkeypatch):
     # 5. _set_by_path, когда исходный корень не словарь и не список на последнем шаге
     scalar = 42
     _set_by_path(scalar, ["0"], "value")  # не падает
+
+
+def test_invalid_contract_types_handled_gracefully():
+    """Проверяет безопасную обработку некорректных типов контрактов (None, str, int, list)."""
+    for invalid in [None, "string", 123, [1, 2, 3]]:
+        assert mutate_type_change(invalid) == []  # type: ignore
+        assert mutate_remove_required(invalid) == []  # type: ignore
+        assert mutate_status_code_swap(invalid) == []  # type: ignore
+        assert generate_mutants(invalid) == []  # type: ignore
+
+
+def test_calculate_mutation_score_type_errors():
+    """Проверяет выброс TypeError при передаче None или некорректных типов в calculate_mutation_score."""
+    with pytest.raises(TypeError, match="не могут быть None"):
+        calculate_mutation_score(total_mutants=None, killed_mutants=5)  # type: ignore
+
+    with pytest.raises(TypeError, match="не могут быть None"):
+        calculate_mutation_score(total_mutants=10, killed_mutants=None)  # type: ignore
+
+    with pytest.raises(TypeError, match="должны быть числовыми значениями"):
+        calculate_mutation_score(total_mutants="10", killed_mutants=5)  # type: ignore

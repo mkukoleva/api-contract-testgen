@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import json
+import pickle
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -165,8 +166,12 @@ def mutate_type_change(contract: dict[str, Any]) -> list[Mutant]:
     Находит в контракте OpenAPI объявления `type` (в схемах моделей, параметров,
     свойств, элементов массивов) и подменяет их на несовместимые типы данных.
     """
+    if not isinstance(contract, dict):
+        return []
+
     mutants: list[Mutant] = []
     counter = 1
+    contract_bytes = pickle.dumps(contract, protocol=pickle.HIGHEST_PROTOCOL)
 
     def _traverse(node: Any, path: list[str]) -> None:
         nonlocal counter
@@ -177,7 +182,7 @@ def mutate_type_change(contract: dict[str, Any]) -> list[Mutant]:
                 if orig_type in TYPE_REPLACEMENTS:
                     new_type = TYPE_REPLACEMENTS[orig_type]
                     target_path = ".".join(path + ["type"])
-                    mutated = copy.deepcopy(contract)
+                    mutated = pickle.loads(contract_bytes)
                     _set_by_path(mutated, path + ["type"], new_type)
 
                     mutants.append(
@@ -194,7 +199,7 @@ def mutate_type_change(contract: dict[str, Any]) -> list[Mutant]:
                     counter += 1
 
             for k, v in node.items():
-                _traverse(v, path + [k])
+                _traverse(v, path + [str(k)])
         elif isinstance(node, list):
             for idx, item in enumerate(node):
                 _traverse(item, path + [str(idx)])
@@ -210,8 +215,12 @@ def mutate_remove_required(contract: dict[str, Any]) -> list[Mutant]:
     1. В схемах объектов: удаляет каждое обязательное поле из списка `required`.
     2. В параметрах операций: подменяет `required: true` на `required: false`.
     """
+    if not isinstance(contract, dict):
+        return []
+
     mutants: list[Mutant] = []
     counter = 1
+    contract_bytes = pickle.dumps(contract, protocol=pickle.HIGHEST_PROTOCOL)
 
     def _traverse(node: Any, path: list[str]) -> None:
         nonlocal counter
@@ -221,7 +230,7 @@ def mutate_remove_required(contract: dict[str, Any]) -> list[Mutant]:
                 req_list = node["required"]
                 for item in req_list:
                     target_path = ".".join(path + ["required"])
-                    mutated = copy.deepcopy(contract)
+                    mutated = pickle.loads(contract_bytes)
                     new_req = [x for x in req_list if x != item]
                     _set_by_path(mutated, path + ["required"], new_req)
 
@@ -244,7 +253,7 @@ def mutate_remove_required(contract: dict[str, Any]) -> list[Mutant]:
                 if "in" in node and "name" in node:
                     param_name = node.get("name", "unknown")
                     target_path = ".".join(path + ["required"])
-                    mutated = copy.deepcopy(contract)
+                    mutated = pickle.loads(contract_bytes)
                     _set_by_path(mutated, path + ["required"], False)
 
                     mutants.append(
@@ -261,7 +270,7 @@ def mutate_remove_required(contract: dict[str, Any]) -> list[Mutant]:
                     counter += 1
 
             for k, v in node.items():
-                _traverse(v, path + [k])
+                _traverse(v, path + [str(k)])
         elif isinstance(node, list):
             for idx, item in enumerate(node):
                 _traverse(item, path + [str(idx)])
@@ -277,8 +286,12 @@ def mutate_status_code_swap(contract: dict[str, Any]) -> list[Mutant]:
     Находит секции responses во всех операциях контракта и подменяет объявленные
     коды ответов (успешные на ошибочные, ошибочные на успешные).
     """
+    if not isinstance(contract, dict):
+        return []
+
     mutants: list[Mutant] = []
     counter = 1
+    contract_bytes = pickle.dumps(contract, protocol=pickle.HIGHEST_PROTOCOL)
 
     paths = contract.get("paths", {})
     if not isinstance(paths, dict):
@@ -296,6 +309,8 @@ def mutate_status_code_swap(contract: dict[str, Any]) -> list[Mutant]:
             if not isinstance(responses, dict):
                 continue
 
+            existing_str_codes = {str(k) for k in responses.keys()}
+
             for status_code, resp_content in responses.items():
                 code_str = str(status_code)
                 swapped_code = STATUS_CODE_SWAPS.get(code_str)
@@ -306,10 +321,10 @@ def mutate_status_code_swap(contract: dict[str, Any]) -> list[Mutant]:
                     swapped_code = "500" if code_str != "500" else "200"
 
                 target_path = f"paths.{path_str}.{method}.responses.{code_str}"
-                mutated = copy.deepcopy(contract)
+                mutated = pickle.loads(contract_bytes)
 
                 # Заменяем статус-код в объекте responses
-                mut_responses = copy.deepcopy(responses)
+                mut_responses = dict(responses)
                 val = mut_responses.pop(status_code)
                 mut_responses[swapped_code] = val
                 _set_by_path(
@@ -351,6 +366,9 @@ def generate_mutants(
     Returns:
         Список объектов Mutant.
     """
+    if not isinstance(contract, dict):
+        return []
+
     if operators is None:
         operators = list(MutationType)
 
@@ -398,6 +416,12 @@ def calculate_mutation_score(
     Returns:
         MutationScoreResult.
     """
+    if total_mutants is None or killed_mutants is None:
+        raise TypeError("total_mutants и killed_mutants не могут быть None.")
+
+    if not isinstance(total_mutants, (int, float)) or not isinstance(killed_mutants, (int, float)):
+        raise TypeError("Параметры должны быть числовыми значениями.")
+
     if total_mutants < 0 or killed_mutants < 0:
         raise ValueError("Количество мутантов не может быть отрицательным.")
 
@@ -429,14 +453,30 @@ def _set_by_path(d: dict[str, Any], path: list[str], val: Any) -> None:
     curr: Any = d
     for step in path[:-1]:
         if isinstance(curr, dict):
-            curr = curr[step]
+            if step in curr:
+                curr = curr[step]
+            elif step.isdigit() and int(step) in curr:
+                curr = curr[int(step)]
+            else:
+                return
         elif isinstance(curr, list):
-            curr = curr[int(step)]
+            try:
+                curr = curr[int(step)]
+            except (ValueError, IndexError):
+                return
         else:
             return
 
     last_step = path[-1]
     if isinstance(curr, dict):
-        curr[last_step] = val
+        if last_step in curr:
+            curr[last_step] = val
+        elif last_step.isdigit() and int(last_step) in curr:
+            curr[int(last_step)] = val
+        else:
+            curr[last_step] = val
     elif isinstance(curr, list):
-        curr[int(last_step)] = val
+        try:
+            curr[int(last_step)] = val
+        except (ValueError, IndexError):
+            pass
