@@ -27,10 +27,8 @@ def base_url() -> str:
 def api_client(base_url):
     """requests.Session bound to the target, without proxies or redirects.
 
-    allow_redirects defaults to False so a redirect from the service can never
-    smuggle traffic towards another host. Pass allow_redirects=True explicitly
-    if a policy test must observe the redirect itself (it will then hit the
-    network block, which is the desired isolation leak signal).
+    Redirect responses are returned unchanged, including when a caller asks
+    to follow them. The kernel firewall also protects clients created by tests.
     """
     import requests
 
@@ -39,14 +37,20 @@ def api_client(base_url):
     class _Client(requests.Session):
         def request(self, method, url, **kwargs):
             kwargs.setdefault("timeout", (min(timeout, 10.0), timeout))
-            kwargs.setdefault("allow_redirects", False)
+            # Session.get supplies True before calling request(), so setdefault
+            # is insufficient here. max_redirects=0 also breaks normal 302s.
+            kwargs["allow_redirects"] = False
             return super().request(method, url, **kwargs)
+
+        def send(self, request, **kwargs):
+            kwargs["allow_redirects"] = False
+            kwargs.setdefault("timeout", (min(timeout, 10.0), timeout))
+            return super().send(request, **kwargs)
 
     session = _Client()
     # Never inherit HTTP(S)_PROXY / NO_PROXY from the environment; the
     # sandbox must not route requests through a host proxy.
     session.trust_env = False
-    session.max_redirects = 0
     try:
         yield session
     finally:

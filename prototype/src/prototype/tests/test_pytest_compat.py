@@ -253,7 +253,7 @@ def test_import_crash_during_collection_is_infrastructure_error(tmp_path):
     proc, suite, events, collect_events = _run_two_phase(tmp_path, {
         "test_bad.py": "import os\nos._exit(0)\n",
     })
-    assert proc.returncode == 0
+    assert proc.returncode != 0
     collect_ok, collect_result = backend().read_collection(collect_events, 0.1)
     assert not collect_ok
     assert collect_result.status == "infrastructure_error"
@@ -299,3 +299,78 @@ def test_service_worker_skips_collect_and_run_when_policy_fails(tmp_path):
     assert proc.returncode != 0
     assert not events.exists(), "user events must not exist after a policy failure"
     assert not collect_events.exists(), "collection must not run when isolation is unproven"
+
+
+@pytest.mark.parametrize("policy_source", [
+    "import pytest\n@pytest.mark.skip(reason='unavailable')\ndef test_policy(): pass",
+    "import pytest\n@pytest.mark.xfail(reason='unavailable')\ndef test_policy(): assert False",
+    "import pytest\ndef test_policy(): pytest.exit('aborted', returncode=0)",
+])
+def test_unproven_policy_blocks_even_imports(tmp_path, policy_source):
+    policy = tmp_path / "policy"
+    suite = tmp_path / "suite"
+    marker = tmp_path / "imported"
+    write(policy / "test_policy.py", policy_source)
+    write(suite / "test_user.py", f"from pathlib import Path\nPath({str(marker)!r}).touch()\ndef test_ok(): pass")
+    proc = subprocess.run([
+        sys.executable, "-I", "-B", str(RUNNER_DIR / "pytest_worker.py"),
+        str(policy), str(suite), str(tmp_path / "policy.jsonl"),
+        str(tmp_path / "events.jsonl"), str(tmp_path / "collect.jsonl"),
+    ], capture_output=True, text=True, timeout=15)
+    assert not marker.exists(), proc.stdout + proc.stderr
+    assert proc.returncode != 0
+
+
+def test_isolated_worker_loads_trusted_fixtures(tmp_path):
+    policy = tmp_path / "policy"
+    suite = tmp_path / "suite"
+    write(policy / "test_policy.py", "def test_plugin(api_client): assert api_client.trust_env is False")
+    write(suite / "test_user.py", "def test_url(base_url): assert base_url == 'http://catalogue:8080'")
+    import os
+    proc = subprocess.run([
+        sys.executable, "-I", "-B", str(RUNNER_DIR / "pytest_worker.py"),
+        str(policy), str(suite), str(tmp_path / "policy.jsonl"),
+        str(tmp_path / "events.jsonl"), str(tmp_path / "collect.jsonl"),
+    ], capture_output=True, text=True, timeout=15,
+        env={**os.environ, "RUNNER_BASE_URL": "http://catalogue:8080"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_service_syntax_precheck_precedes_docker(tmp_path, monkeypatch):
+    suite = tmp_path / "suite"
+    write(suite / "test_broken.py", "def test_bad(:")
+    monkeypatch.setattr(backend().subprocess, "run",
+                        lambda *a, **k: pytest.fail("syntax precheck must not require Docker"))
+    result = backend().run_tests(RunConfig(suite, tmp_path / "out", base_url="http://catalogue:8080"),
+                                 network="runner-net")
+    assert result.status == "collection_error"
+    assert result.compatibility_issues
+
+
+@pytest.mark.parametrize("contents", [
+    b'\xef\xbb\xbfdef test_ok(): pass\n',
+    b'# coding: latin-1\ndef test_ok(): assert "\xe9"\n',
+])
+def test_precheck_accepts_python_source_encodings(tmp_path, contents):
+    (tmp_path / "test_valid.py").write_bytes(contents)
+    assert precheck_syntax(tmp_path) == ()
+
+
+def test_policy_and_user_modules_may_have_the_same_name(tmp_path):
+    policy = tmp_path / "policy"
+    suite = tmp_path / "suite"
+    write(policy / "test_same.py", "def test_policy(): pass")
+    write(suite / "test_same.py", "def test_user(): pass")
+    proc = subprocess.run([
+        sys.executable, "-I", "-B", str(RUNNER_DIR / "pytest_worker.py"),
+        str(policy), str(suite), str(tmp_path / "policy.jsonl"),
+        str(tmp_path / "events.jsonl"), str(tmp_path / "collect.jsonl"),
+    ], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_non_text_source_encoding_returns_diagnostic(tmp_path):
+    (tmp_path / "test_bad_encoding.py").write_bytes(b"# coding: base64_codec\npass\n")
+    issues = precheck_syntax(tmp_path)
+    assert len(issues) == 1
+    assert issues[0].category == IssueCategory.SYNTAX

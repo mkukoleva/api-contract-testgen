@@ -1,6 +1,7 @@
 *
 !Dockerfile
 !pytest_worker.py
+!network_bootstrap.py
 !fixtures.py
 !policy_tests/
 !policy_tests/*

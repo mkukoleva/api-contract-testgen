@@ -1,9 +1,8 @@
 """Isolated Docker runner. Does not import the agent or call an LLM.
 
-Step 4 adds the service network policy: with a base_url and a runner network,
-the container is attached only to that network, the target DNS name is pinned
-into /etc/hosts via --add-host, and a trusted policy suite must confirm the
-isolation before the generated tests are allowed to run.
+Service mode pins the target in /etc/hosts and uses a trusted bootstrap to
+allow only the API TCP address:port with an in-container kernel firewall.
+Privileges are irrevocably dropped before policy checks and test imports.
 
 Step 5 adds the automatic pytest compatibility check. A host-side syntax
 precheck (ast.parse, no execution, no Docker) is a hard gate. Inside the
@@ -306,17 +305,20 @@ def _docker_create_args(
     args = [
         "docker", "create", "--pull=never", "--name", name,
         "--read-only", "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges:true", "--user", "65534:65534",
+        "--security-opt", "no-new-privileges:true",
         "--pids-limit", "128", "--memory", "256m", "--cpus", "1",
         "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777",
         "--mount", f"type=bind,source={tests_dir},target=/tests,readonly",
         "--mount", f"type=bind,source={run_dir},target=/results",
     ]
     if network is None:
-        args.append("--network")
-        args.append("none")
+        args += ["--network", "none", "--user", "65534:65534"]
     else:
-        args += ["--network", network]
+        # Only the trusted bootstrap has these capabilities. setpriv clears
+        # every capability set before exec'ing the worker, including bounding.
+        args += ["--network", network, "--user", "0:0"]
+        for capability in ("NET_ADMIN", "SETUID", "SETGID", "SETPCAP"):
+            args += ["--cap-add", capability]
         args += ["--add-host", f"{service_hostname}:{target_ip}"]
         args += [
             "--env", f"RUNNER_BASE_URL={config.base_url}",
@@ -379,11 +381,6 @@ def run_tests(
                     "base_url requires a runner network name (--network), "
                     "e.g. pytest-runner-catalogue_runner; offline runs stay with base_url=None")
             service_hostname = _service_hostname(config.base_url)
-            network_spec = _network_inspect(network)
-            target_ip, gateway = _service_target(network_spec)
-            unreachable = _collect_unreachable([
-                _network_inspect(net) for net in blocked_networks])
-            unreachable = sorted(set(unreachable + ([gateway] if gateway else [])))
         tests_dir = config.tests_dir.resolve(strict=True)
         output_dir = config.output_dir.resolve()
         if not tests_dir.is_dir():
@@ -424,6 +421,13 @@ def run_tests(
 
         def remaining():
             return max(0.001, config.timeout_seconds - (time.monotonic() - start))
+
+        if service:
+            network_spec = _network_inspect(network)
+            target_ip, gateway = _service_target(network_spec)
+            unreachable = _collect_unreachable([
+                _network_inspect(net) for net in blocked_networks])
+            unreachable = sorted(set(unreachable + [gateway]))
 
         attempted_create = True
         created = subprocess.run(_docker_create_args(
@@ -471,7 +475,7 @@ def run_tests(
             "infrastructure_error", None, duration)
     if override:
         result = replace(result, status=override, error_message=error)
-    if service and policy_events_path is not None and policy_events_path.is_file():
+    if service and policy_events_path is not None and override is None:
         policy_ok, policy_message = read_policy_result(policy_events_path)
         if not policy_ok:
             # An isolation leak is not a user test failure and is never repaired

@@ -13,6 +13,7 @@ can be exercised under ``python -I -S`` like ``contracts``.
 
 import ast
 from pathlib import Path
+import tokenize
 
 from .contracts import CompatibilityIssue, IssueCategory
 
@@ -45,11 +46,12 @@ def precheck_syntax(tests_dir: Path | str) -> tuple[CompatibilityIssue, ...]:
 
 def _check_file(path: Path, issues: list[CompatibilityIssue]) -> None:
     try:
-        source = path.read_text(encoding="utf-8")
-    except (UnicodeDecodeError, OSError) as exc:
+        with tokenize.open(path) as stream:
+            source = stream.read()
+    except (UnicodeError, SyntaxError, OSError) as exc:
         issues.append(CompatibilityIssue(
             IssueCategory.SYNTAX, str(path),
-            f"cannot read file as UTF-8: {exc}", auto_fixable=False))
+            f"cannot decode Python source (UTF-8 unless an encoding is declared): {exc}", auto_fixable=False))
         return
     try:
         ast.parse(source, filename=str(path))
