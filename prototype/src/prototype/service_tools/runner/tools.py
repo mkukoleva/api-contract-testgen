@@ -456,3 +456,90 @@ def save_tests_tool(
         "collection_status": manifest["collection"]["status"],
         "errors": problems[:5],
     }
+
+
+@tool
+def generate_tests_tool(
+    contract_path: str,
+    base_url: str,
+    network: str | None = None,
+    blocked_networks: str | None = None,
+    max_repair_attempts: int = 3,
+) -> dict[str, Any]:
+    """
+    Сгенерировать pytest-тесты по OpenAPI-контракту и прогнать их.
+
+    Инструмент запускает полный конвейер (ADR 0004): генерация тестов по
+    контракту -> постобработка -> запуск через изолированный pytest-runner ->
+    ограниченный self-repair (не более max_repair_attempts попыток и в рамках
+    токен-бюджета; одинаковые повторяющиеся ошибки останавливают цикл).
+
+    Repair не выполняется в случаях: недоступность Docker/API (infrastructure,
+    timeout), прерывание прогона, а также когда фактический ответ сервиса
+    противоречит документированным ответам контракта (suspected_defects) —
+    при этом assert не ослабляется.
+
+    Args:
+        contract_path: Путь к OpenAPI/Swagger-файлу контракта.
+        base_url: Адрес тестируемого API, например 'http://catalogue:8080'.
+        network: Docker-сеть, в которой живёт тестируемое API.
+        blocked_networks: Список Docker-сетей через запятую, к которым доступ
+            запрещён (например 'pytest-runner-catalogue_database').
+        max_repair_attempts: Максимальное число попыток self-repair (по
+            умолчанию 3, как в плане команды).
+
+    Returns:
+        Компактный структурированный результат конвейера: pipeline_status,
+        attempts, tokens, итоговая сводка pytest (summary), repair_log,
+        suspected_defects и saved_versions. Код сгенерированных тестов
+        обратно не возвращается; каждая попытка сохранена как неизменяемая
+        версия (см. saved_versions).
+    """
+
+    print()
+    print("=" * 60)
+    print("[TOOL] Вызван generate_tests_tool")
+    print(f"[TOOL] Контракт: {contract_path}")
+    print(f"[TOOL] Base URL: {base_url}")
+    print(f"[TOOL] Max repair attempts: {max_repair_attempts}")
+    print("=" * 60)
+    print()
+
+    from ...generator.contracts import GenerationSettings
+    from ...generator.pipeline import run_generation_pipeline
+
+    blocked = tuple(
+        item.strip()
+        for item in (blocked_networks or "").split(",")
+        if item.strip()
+    )
+
+    try:
+        run_settings = GenerationSettings(
+            contract_path=contract_path,
+            base_url=base_url,
+            network=network,
+            blocked_networks=blocked,
+            max_repair_attempts=max_repair_attempts,
+        )
+        run = run_generation_pipeline(run_settings)
+    except (ValueError, OSError) as exc:
+        return {
+            "tool": "generate_tests_tool",
+            "status": "error",
+            "message": f"Не удалось запустить конвейер генерации: {exc}",
+        }
+
+    return {
+        "tool": "generate_tests_tool",
+        "status": "success" if run.status == "success" else run.status,
+        "pipeline_status": run.status,
+        "attempts": run.attempts,
+        "tokens": run.to_dict()["tokens"],
+        "summary": (run.run_result or {}).get("summary", {}),
+        "repair_log": [attempt.to_dict() for attempt in run.repair_log],
+        "suspected_defects": list(run.suspected_defects),
+        "environmental": list(run.environmental),
+        "saved_versions": list(run.saved_versions),
+        "generator_errors": list(run.generator_errors),
+    }

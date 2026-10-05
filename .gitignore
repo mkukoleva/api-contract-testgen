@@ -11,3 +11,9 @@ venv/
 .hypothesis/
 .coverage*
 .runner-results/
+
+# Артефакты генерации и прогонов конвейера генерации
+prototype/.pipeline-runs/
+prototype/.repair-check-runs/
+prototype/.repair-probe/
+prototype/generated/

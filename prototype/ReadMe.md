@@ -34,7 +34,7 @@ py -3.12 -m uv run --locked tester src/prototype/tests/fixtures/demo_openapi.yam
 ```
 DEEPCODE_API_KEY=<api-key>
 DEEPCODE_BASE_URL=https://deepcode.ci.nsu.ru/api/v1
-DEEPCODE_MODEL=deepseek-ai/DeepSeek-V4-Flash
+DEEPCODE_MODEL=deepseek-ai/DeepSeek-V4-Flash-0731
 
 ```
 ### запуск микросервисов для тестирования 
@@ -425,3 +425,53 @@ print(saved.tests_dir)   # generated/demo-catalogue-api/2026-09-28_153012/tests
 с генератором тестов. Сбор выполняет код верхнего уровня тестовых модулей
 и не является изоляцией. Подробности — в
 [ADR 0003](../docs/adr/0003-generated-tests-storage.md).
+
+### Генерация тестов и ограниченный self-repair (пп. 2.1.5, 2.1.2 ТЗ)
+
+Модуль `prototype.generator` реализует конвейер «реальная генерация +
+ограниченный self-repair»: один структурированный LLM-вызов генерирует набор
+pytest-файлов по контракту; постобработка нормализует код и статически
+проверяет его (`ast`, без исполнения); готовый набор прогоняется через
+изолированный pytest-runner; упавшие `test_*`-функции (или файлы при ошибках
+сбора) могут быть ограниченно отремонтированы. Программный API:
+
+```python
+from prototype.generator import GenerationSettings, run_generation_pipeline
+
+run = run_generation_pipeline(GenerationSettings(
+    contract_path="../benchmark/catalogue/catalogue.swagger.json",
+    base_url="http://catalogue:8080",
+    network="pytest-runner-catalogue_runner",
+    blocked_networks=("pytest-runner-catalogue_database",),
+    output_dir=".pipeline-runs",
+))
+print(run.status, run.attempts, run.to_dict()["tokens"])
+```
+
+Границы (ADR 0004):
+
+- ремонтируется только код генератора: синтаксис, импорты, пути/методы,
+  выбор входных данных; успешные тесты повторно не генерируются — чинится
+  только упавшая функция;
+- недоступность Docker/API, таймаут и прерывание не вызывают LLM;
+- фактический ответ, противоречащий контракту (недокументированный статус),
+  — это `suspected_defect`: assert не ослабляется, ремонт не выполняется;
+- лимиты: до 3 попыток ремонта (`TESTGEN_MAX_REPAIR_ATTEMPTS`) и 30 000
+  выходных токенов (`TESTGEN_REPAIR_TOKEN_BUDGET`); повтор одинаковой ошибки
+  останавливает цикл;
+- пейлоад ремонта компактен: функция ≤ 30 строк, фрагмент контракта ≤ 1500
+  символов, хвост диагностики ≤ 2000 символов.
+
+Каждая попытка сохраняется отдельной неизменяемой версией через
+`save_test_suite(..., collect=False)` (сбор — за runner). Для агента добавлен
+тонкий tool `generate_tests_tool`; в `build_agent` он будет подключён отдельно.
+Offline-тесты конвейера используют подменённые LLM и runner; живой прогон с
+настоящим стендом — см. раздел «Полная проверка этапов 1–5». Подробности —
+в [ADR 0004](../docs/adr/0004-generation-self-repair.md).
+
+Живая проверка 2026-10-05 (стенд Catalogue + образ `api-contract-pytest-runner:step5`
++ реальная модель `deepseek-ai/DeepSeek-V4-Flash-0731`): генерация и изолированный
+прогон в service-режиме прошли; недокументированный 500 на `/catalogue/1`
+корректно классифицирован `suspected_defect` без вызова LLM; направленный ремонт
+упавшей функции выполнен реальной моделью (assert не ослаблен) и подтверждён
+повторным прогоном. Оффлайн-набор: 339 passed, 12 skipped.
