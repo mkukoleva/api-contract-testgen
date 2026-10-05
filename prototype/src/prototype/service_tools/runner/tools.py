@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from ...llm.model import build_model
 from ...parser.contract import read_contract_summary
+from ...storage import GeneratedFile, SaveRequest, save_test_suite
 
 
 # Адрес микросервиса-обёртки над Schemathesis
@@ -386,4 +387,72 @@ def schemathesis_tool(
         "tool": "schemathesis_tool",
         "status": "success",
         **payload,
+    }
+
+
+@tool
+def save_tests_tool(
+    contract_path: str,
+    files: list[dict[str, str]],
+    model: str | None = None,
+) -> dict[str, Any]:
+    """
+    Сохранить сгенерированные pytest-тесты как новую неизменяемую версию.
+
+    Каждый файл проверяется ast.parse: корректные попадают в tests/,
+    файлы с синтаксической ошибкой — в rejected/. Затем набор проверяется
+    pytest --collect-only (тела тестов не выполняются). Версия сохраняется
+    в generated/<контракт>/<дата_время>/ вместе с manifest.json.
+
+    Args:
+        contract_path: Путь к OpenAPI-контракту, по которому созданы тесты.
+        files: Список файлов, каждый — {'name': 'test_*.py', 'code': '...'}.
+        model: Имя модели, сгенерировавшей тесты (опционально).
+
+    Returns:
+        Компактная сводка: run_id, tests_dir (путь для запуска),
+        summary, collection_status и до 5 ошибок синтаксиса/сбора.
+        Код тестов обратно не возвращается.
+    """
+
+    print()
+    print("=" * 60)
+    print("[TOOL] Вызван save_tests_tool")
+    print(f"[TOOL] Контракт: {contract_path}")
+    print(f"[TOOL] Файлов: {len(files)}")
+    print("=" * 60)
+    print()
+
+    try:
+        request = SaveRequest(
+            contract_path=contract_path,
+            files=tuple(
+                GeneratedFile(item.get("name", ""), item.get("code", ""))
+                for item in files
+            ),
+            model=model,
+        )
+        saved = save_test_suite(request)
+    except (ValueError, OSError) as exc:
+        return {
+            "tool": "save_tests_tool",
+            "status": "error",
+            "message": f"Не удалось сохранить тесты: {exc}",
+        }
+
+    manifest = saved.manifest
+    problems = [
+        f"{item['name']}: {item['error']}"
+        for item in manifest["files"]
+        if item["error"]
+    ] + manifest["collection"]["errors"]
+
+    return {
+        "tool": "save_tests_tool",
+        "status": "success",
+        "run_id": saved.run_id,
+        "tests_dir": str(saved.tests_dir),
+        "summary": manifest["summary"],
+        "collection_status": manifest["collection"]["status"],
+        "errors": problems[:5],
     }

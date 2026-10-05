@@ -401,3 +401,27 @@ policy-набору на хосте; внутри runner он прошёл. Со
 и доступными метриками от ответственного модуля команды. Текущий отчёт описывает
 запуск уже готовых pytest-файлов; ошибки самой генерации runner не наблюдает.
 Self-repair не является требованием 2.2.6 и не входит в этот этап.
+
+### Сохранение сгенерированных тестов (п. 2.1.6 ТЗ)
+
+Модуль `prototype.storage` сохраняет pytest-код генератора как
+неизменяемую версию с `manifest.json`:
+
+```python
+from prototype.storage import GeneratedFile, SaveRequest, save_test_suite
+
+saved = save_test_suite(SaveRequest(
+    contract_path="src/prototype/tests/fixtures/demo_openapi.yaml",
+    files=(GeneratedFile("test_catalogue.py", code),),
+    model="deepseek-ai/DeepSeek-V4-Flash",
+))
+print(saved.tests_dir)   # generated/demo-catalogue-api/2026-09-28_153012/tests
+```
+
+Файлы с синтаксической ошибкой попадают в `rejected/`, остальные
+проверяются `pytest --collect-only`. Каталог по умолчанию —
+`prototype/generated`, переопределяется `TESTGEN_OUTPUT_DIR`. Для агента
+есть tool `save_tests_tool`; к `build_agent` он будет подключён вместе
+с генератором тестов. Сбор выполняет код верхнего уровня тестовых модулей
+и не является изоляцией. Подробности — в
+[ADR 0003](../docs/adr/0003-generated-tests-storage.md).
