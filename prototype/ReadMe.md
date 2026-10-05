@@ -418,10 +418,12 @@ saved = save_test_suite(SaveRequest(
 print(saved.tests_dir)   # generated/demo-catalogue-api/2026-09-28_153012/tests
 ```
 
-Файлы с синтаксической ошибкой попадают в `rejected/`, остальные
-проверяются `pytest --collect-only`. Каталог по умолчанию —
-`prototype/generated`, переопределяется `TESTGEN_OUTPUT_DIR`. Для агента
-есть tool `save_tests_tool`; к `build_agent` он будет подключён вместе
-с генератором тестов. Сбор выполняет код верхнего уровня тестовых модулей
-и не является изоляцией. Подробности — в
+Файлы с синтаксической ошибкой (проверка через `ast`, без выполнения кода)
+попадают в `rejected/`, остальные — в `tests/`. Код тестов при сохранении
+не выполняется: `pytest --collect-only` и запуск делает изолированный
+Docker-runner, которому передаётся `saved.tests_dir`. Сбор на хосте
+(`collect=True`) — только явная опция для доверенного кода. Каталог по
+умолчанию — `prototype/generated`, переопределяется `TESTGEN_OUTPUT_DIR`.
+Для агента есть tool `save_tests_tool`; к `build_agent` он будет подключён
+вместе с генератором тестов. Подробности — в
 [ADR 0003](../docs/adr/0003-generated-tests-storage.md).

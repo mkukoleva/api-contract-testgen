@@ -2,7 +2,8 @@
 
 Collection imports every test module, so module-level code DOES execute. This is
 not a sandbox and not network isolation: that belongs to the runner (ТЗ 2.2.6,
-ADR 0002). Pass collect=False once collection happens inside the isolated runner.
+ADR 0002). SaveRequest.collect is therefore False by default; collection runs
+in the isolated Docker runner instead.
 """
 
 import os
