@@ -129,12 +129,16 @@ def _phase(mode, suite_dir, events, *, service):
         sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--phase",
         mode, suite_dir, events, "yes" if service else "no",
     ])
-    if mode == "policy" and process.returncode == 0:
+    if mode in {"policy", "collect"} and process.returncode == 0:
         try:
-            final = json.loads(Path(events).read_text(encoding="utf-8").splitlines()[-1])
-            if final != {"kind": "finish", "exit_code": 0}:
+            records = [json.loads(line) for line in
+                       Path(events).read_text(encoding="utf-8").splitlines()]
+            if records[-1] != {"kind": "finish", "exit_code": 0} or any(
+                record.get("kind") in {"interrupted", "collection_error"}
+                for record in records
+            ):
                 return 3
-        except (OSError, ValueError, IndexError):
+        except (OSError, ValueError, IndexError, AttributeError):
             return 3
     return process.returncode
 

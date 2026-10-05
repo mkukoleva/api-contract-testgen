@@ -55,7 +55,8 @@ networks:
   database:
     internal: true
   # The test runner is attached only to this network, where the only
-  # container is catalogue. Nothing else is reachable from this network.
+  # container is catalogue. The runner's own firewall restricts traffic
+  # to the Catalogue API port; internal networking alone is not an allowlist.
   runner:
     internal: true
 

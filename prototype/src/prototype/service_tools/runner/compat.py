@@ -48,7 +48,7 @@ def _check_file(path: Path, issues: list[CompatibilityIssue]) -> None:
     try:
         with tokenize.open(path) as stream:
             source = stream.read()
-    except (UnicodeError, SyntaxError, OSError) as exc:
+    except (UnicodeError, SyntaxError, OSError, LookupError) as exc:
         issues.append(CompatibilityIssue(
             IssueCategory.SYNTAX, str(path),
             f"cannot decode Python source (UTF-8 unless an encoding is declared): {exc}", auto_fixable=False))

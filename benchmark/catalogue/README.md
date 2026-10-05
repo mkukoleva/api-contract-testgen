@@ -21,6 +21,11 @@
   `database` передаются как недоступные (`--blocked-network`). Проверка
   изоляции (интернет, хост/gateway, база, IPv6, DNS, raw-socket, редиректы)
   выполняется до запуска сгенерированных тестов.
+  До этой проверки доверенный launcher устанавливает firewall внутри контейнера
+  runner: разрешён только TCP к IP и порту API (и локальный TCP 127.0.0.1
+  внутри самого runner). Остальные адреса/порты, UDP и IPv6 блокируются.
+  Права на изменение firewall снимаются до импорта тестов. Одного
+  `internal: true` для такой защиты недостаточно.
 - У Catalogue оставлена только capability `NET_BIND_SERVICE`: в готовом образе
   файл `/app` имеет `cap_net_bind_service+ep`. Если убрать capability полностью,
   Linux запрещает выполнение файла (`exec /app: operation not permitted`), даже
