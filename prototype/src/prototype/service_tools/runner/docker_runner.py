@@ -12,6 +12,7 @@ error stops the run before a single test body executes.
 """
 
 from dataclasses import replace
+from datetime import datetime, timezone
 import ipaddress
 import json
 from pathlib import Path
@@ -19,6 +20,8 @@ import subprocess
 import time
 from urllib.parse import urlsplit
 from uuid import uuid4
+
+from prototype.reports.runner_report import save_run_report
 
 from .compat import precheck_syntax
 from .contracts import (
@@ -336,11 +339,47 @@ def _docker_create_args(
 
 
 def run_tests(
+    config: RunConfig, *, image: str = DEFAULT_IMAGE,
+    network: str | None = None, blocked_networks: tuple[str, ...] = (),
+) -> RunResult:
+    """Execute saved tests and persist timestamped JSON/Markdown reports.
+
+    Report writing happens on the host after container cleanup, including for
+    syntax, collection and environment failures. No quality metrics or LLM calls.
+    """
+    started_at = datetime.now(timezone.utc)
+    name = f"pytest-runner-{started_at.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid4().hex}"
+    result = _execute_tests(config, image=image, network=network,
+                            blocked_networks=blocked_networks, name=name)
+    finished_at = datetime.now(timezone.utc)
+    try:
+        tests_dir = config.tests_dir.resolve()
+        output_dir = config.output_dir.resolve()
+        # Never circumvent the execution-side mount/path validation when
+        # saving an error report (especially an output nested inside tests).
+        if output_dir.is_relative_to(tests_dir) or tests_dir.is_relative_to(output_dir):
+            return result
+        if any(char in str(path) for path in (tests_dir, output_dir) for char in ',\n\r'):
+            return result
+        input_files = sorted(path.relative_to(tests_dir).as_posix()
+                             for path in tests_dir.rglob('*.py')) if tests_dir.is_dir() else []
+        return save_run_report(result, config, output_dir / name,
+                               started_at=started_at, finished_at=finished_at,
+                               input_files=input_files, image=image, network=network)
+    except (OSError, ValueError) as exc:
+        # Preserve all test results and diagnostics; report failure must make
+        # CLI/CI fail even when pytest itself returned zero.
+        return replace(result, status=RunStatus.INFRASTRUCTURE_ERROR,
+                       error_message=f"{result.error_message or ''}\nCannot save runner reports: {exc}".strip())
+
+
+def _execute_tests(
     config: RunConfig,
     *,
     image: str = DEFAULT_IMAGE,
     network: str | None = None,
     blocked_networks: tuple[str, ...] = (),
+    name: str,
 ) -> RunResult:
     """Run a prepared suite in a fresh container; image is chosen by the caller.
 
@@ -360,7 +399,6 @@ def run_tests(
     execution; container cleanup can take up to CONTROL_TIMEOUT extra seconds.
     """
     start = time.monotonic()
-    name = f"pytest-runner-{uuid4().hex}"
     paths = {}
     attempted_create = False
     override = None
