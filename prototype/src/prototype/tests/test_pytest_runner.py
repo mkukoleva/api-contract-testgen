@@ -234,6 +234,10 @@ def test_docker_lifecycle(tmp_path, source, status, code):
     assert result.status == status, result.to_dict()
     assert result.exit_code == code
     assert Path(result.report_paths["log"]).is_file()
+    report = json.loads(Path(result.report_paths["json"]).read_text(encoding="utf-8"))
+    assert report["result"]["status"] == status
+    assert report["result"]["exit_code"] == code
+    assert Path(result.report_paths["markdown"]).is_file()
 
 
 @DOCKER
@@ -288,6 +292,9 @@ def test_docker_timeout_and_cleanup(tmp_path, during_import):
     assert result.exit_code is None
     assert result.duration_seconds < 20
     assert len(result.tests) == (0 if during_import else 1)
+    report = json.loads(Path(result.report_paths["json"]).read_text(encoding="utf-8"))
+    assert report["result"]["status"] == "timeout"
+    assert len(report["result"]["tests"]) == (0 if during_import else 1)
     name = Path(result.report_paths["log"]).parent.name
     containers = subprocess.run(
         ["docker", "ps", "-aq", "--filter", f"name=^{name}$"],

@@ -261,6 +261,22 @@ def test_import_crash_during_collection_is_infrastructure_error(tmp_path):
     assert not events.exists()
 
 
+@pytest.mark.parametrize("files, expected_status", [
+    ({"test_stop.py": "import pytest\npytest.exit('stop collection', returncode=0)\n"},
+     "collection_error"),
+    ({"conftest.py": "import pytest\ndef pytest_sessionstart(session):\n"
+                     "    pytest.exit('stop collection', returncode=0)\n",
+      "test_ok.py": "def test_ok(): pass\n"}, "interrupted"),
+])
+def test_zero_exit_interruption_during_collection_blocks_execution(tmp_path, files, expected_status):
+    proc, suite, events, collect_events = _run_two_phase(tmp_path, files)
+    assert proc.returncode != 0
+    collect_ok, result = backend().read_collection(collect_events, 0.1)
+    assert not collect_ok
+    assert result.status == expected_status
+    assert not events.exists()
+
+
 # ----------------------------------------- five-arg service worker (host)
 
 
