@@ -155,16 +155,15 @@ def _extract_token_usage(result: dict[str, Any]) -> tuple[int | None, int | None
 
         found_usage = True
 
-        input_tokens += int(usage.get("input_tokens", 0) or 0)
-        output_tokens += int(usage.get("output_tokens", 0) or 0)
-        total_tokens += int(
-            usage.get(
-                "total_tokens",
-                (usage.get("input_tokens", 0) or 0)
-                + (usage.get("output_tokens", 0) or 0),
-            )
-            or 0
-        )
+        in_tokens = int(usage.get("input_tokens", 0) or 0)
+        out_tokens = int(usage.get("output_tokens", 0) or 0)
+        tot_tokens = usage.get("total_tokens")
+        if tot_tokens is None:
+            tot_tokens = in_tokens + out_tokens
+
+        input_tokens += in_tokens
+        output_tokens += out_tokens
+        total_tokens += int(tot_tokens or 0)
 
     if not found_usage:
         return None, None, None
