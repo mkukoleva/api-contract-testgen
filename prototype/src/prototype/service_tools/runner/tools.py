@@ -400,8 +400,8 @@ def save_tests_tool(
     Сохранить сгенерированные pytest-тесты как новую неизменяемую версию.
 
     Каждый файл проверяется ast.parse: корректные попадают в tests/,
-    файлы с синтаксической ошибкой — в rejected/. Затем набор проверяется
-    pytest --collect-only (тела тестов не выполняются). Версия сохраняется
+    файлы с синтаксической ошибкой — в rejected/. Код не импортируется;
+    сбор тестов выполняется только изолированным runner. Версия сохраняется
     в generated/<контракт>/<дата_время>/ вместе с manifest.json.
 
     Args:
@@ -431,6 +431,7 @@ def save_tests_tool(
                 for item in files
             ),
             model=model,
+            collect=False,
         )
         saved = save_test_suite(request)
     except (ValueError, OSError) as exc:

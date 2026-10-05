@@ -44,14 +44,19 @@ class GeneratedFile:
 
 @dataclass(frozen=True)
 class SaveRequest:
-    """Everything save_test_suite needs to store one generation run."""
+    """Everything save_test_suite needs to store one generation run.
+
+    Saving defaults to static analysis without importing generated code.
+    collect=True is a legacy opt-in for trusted, controlled fixtures only:
+    collection imports modules on the host and provides no sandbox.
+    """
 
     contract_path: Path | str
     files: tuple[GeneratedFile, ...]
     model: str | None = None
     generator_meta: Mapping[str, Any] = field(default_factory=dict)
     output_root: Path | str | None = None
-    collect: bool = True
+    collect: bool = False
     collect_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:

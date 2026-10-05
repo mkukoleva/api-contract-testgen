@@ -1,8 +1,9 @@
-"""Collect generated tests with pytest in a subprocess; test bodies are never run.
+"""Legacy host collection for explicitly trusted, controlled fixtures only.
 
 Collection imports every test module, so module-level code DOES execute. This is
 not a sandbox and not network isolation: that belongs to the runner (ТЗ 2.2.6,
-ADR 0002). Pass collect=False once collection happens inside the isolated runner.
+ADR 0002). Normal storage and tool flows skip this collector; generated code
+must be collected inside the isolated runner. Test bodies are never run here.
 """
 
 import os

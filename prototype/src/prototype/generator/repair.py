@@ -6,11 +6,13 @@ Boundaries (ADR 0004):
 - A test that fails because the observed response contradicts the documented
   contract is a suspected service defect: it is reported and NOT repaired, so
   an assertion is never weakened to make the test pass.
-- Collection/syntax/import errors repair the whole file; failed or errored
-  test bodies repair only the failing test function.
+- Collection errors request a file candidate; body failures request a function.
+  Application requires an unchanged AST except HTTP method / literal URL edits.
+  Broader changes, including syntax-invalid originals, require human review.
 """
 
 import ast
+import copy
 from dataclasses import dataclass
 import re
 from typing import Any, Literal
@@ -178,6 +180,10 @@ def replace_function(code: str, function_path: tuple[str, ...], fixed: str) -> s
         )
 
     replacement = fixed.strip("\n") + "\n"
+    # A model often returns just `def ...`. Preserve existing parametrization
+    # and markers rather than silently dropping them along with the function.
+    if node.decorator_list and not replacement.lstrip().startswith("@"):
+        replacement = _source_slice(code, _decorator_start_line(node), node.lineno - 1) + replacement
     new_code = _source_slice(code, 1, _decorator_start_line(node) - 1) + replacement
     new_code += _source_slice(code, node.end_lineno + 1, len(code.splitlines()))
 
@@ -189,7 +195,52 @@ def replace_function(code: str, function_path: tuple[str, ...], fixed: str) -> s
         raise ValueError(
             f"repaired code lost the test function {'::'.join(function_path)}"
         )
+    _validate_repair(tree, new_tree)
     return new_code
+
+
+class _RepairShape(ast.NodeTransformer):
+    """Allow literal HTTP URL/method fixes; preserve checks and control flow.
+
+    This deliberately declines broader rewrites (including schema assertions).
+    A prompt alone cannot enforce preservation of a test's meaning.
+    """
+
+    def visit_Assert(self, node):
+        return node  # A request embedded in an assertion is part of its oracle.
+
+    def visit_FunctionDef(self, node):
+        node.body = [self.visit(statement) for statement in node.body]
+        return node  # Do not normalize decorators, defaults or annotations.
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        func = node.func
+        if (isinstance(func, ast.Attribute) and func.attr in _HTTP_VERBS and node.args
+                and isinstance(func.value, ast.Name) and func.value.id in {"api_client", "requests"}):
+            url = node.args[0]
+            # Interpolated variables must remain identical: only literal
+            # portions of a URL may change, not arbitrary executable expressions.
+            if isinstance(url, ast.Constant) and isinstance(url.value, str):
+                node.args[0] = ast.Constant(value="<url>")
+            elif isinstance(url, ast.JoinedStr):
+                for part in url.values:
+                    if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                        part.value = "<url>"
+            func.attr = "<http-method>"
+        return node
+
+
+def _validate_repair(before: ast.Module, after: ast.Module) -> None:
+    # Conservative allowlist: only literal HTTP URL/method changes. Import
+    # rewrites can shadow assertion helpers too, so require review as well.
+    def shape(tree):
+        tree = copy.deepcopy(tree)
+        return ast.dump(_RepairShape().visit(tree), include_attributes=False)
+    if shape(before) != shape(after):
+        raise ValueError("repair requires review: checks or execution structure changed")
 
 
 def _joined_pattern(node: ast.JoinedStr) -> str | None:
@@ -310,6 +361,12 @@ def classify_result(
         if file_name not in files:
             continue
         code = files[file_name]
+
+        # Exceptions in the call phase are FAILED in pytest, not ERROR.
+        # Apply environment classification before branching on the outcome.
+        if is_environmental_failure(test.message, base_url):
+            environmental.append({"nodeid": test.nodeid, "message": test.message})
+            continue
 
         if test.outcome == TestOutcome.ERROR:
             if is_environmental_failure(test.message, base_url):
@@ -577,5 +634,11 @@ def apply_repair(files: dict[str, str], target: RepairTarget, fixed: str) -> dic
     if target.kind == "function" and target.function_path:
         updated[target.file] = replace_function(updated[target.file], target.function_path, fixed)
     else:
-        updated[target.file] = fixed.rstrip("\n") + "\n"
+        candidate = fixed.rstrip("\n") + "\n"
+        try:
+            before, after = ast.parse(updated[target.file]), ast.parse(candidate)
+        except SyntaxError as exc:
+            raise ValueError("repair requires review: cannot compare syntax-invalid source safely") from exc
+        _validate_repair(before, after)
+        updated[target.file] = candidate
     return updated

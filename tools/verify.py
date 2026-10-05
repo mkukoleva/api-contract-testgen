@@ -32,6 +32,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOTYPE_DIR = ROOT / "prototype"
@@ -109,13 +110,13 @@ class Verify:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         now = datetime.now(timezone.utc)
-        self.run_id = now.strftime("%Y-%m-%d_%H%M%S")
+        self.run_id = now.strftime("%Y-%m-%d_%H%M%S") + "_" + uuid4().hex
         self.started_at = now.isoformat()
         report_root = Path(args.report_root)
         if not report_root.is_absolute():
             report_root = ROOT / report_root
         self.report_dir = report_root / self.run_id
-        self.report_dir.mkdir(parents=True, exist_ok=True)
+        self.report_dir.mkdir(parents=True, exist_ok=False)
         self.steps: list[dict[str, Any]] = []
         self.ok = True
 
@@ -174,8 +175,6 @@ def env_check_common() -> str:
             f"project uses {PROTOTYPE_DIR / '.python-version'} — run "
             f"`uv sync --locked` once in prototype/"
         )
-    if not shutil.which("uv"):
-        raise Failure("uv is not installed; install it and run `uv sync --locked` once in prototype/")
     if os.environ.get("DEEPCODE_API_KEY"):
         return "python 3.14.7 ok (DEEPCODE_API_KEY present but tests never call the LLM)"
     return "python 3.14.7 ok"
@@ -275,15 +274,21 @@ def resolve_saved_set(args: argparse.Namespace) -> Path:
 
 
 def stand_down() -> str:
-    run(["docker", "compose", "-f", str(COMPOSE_FILE), "down", "--volumes", "--remove-orphans"],
+    run(["docker", "compose", "-f", str(COMPOSE_FILE), "down"],
         timeout=180)
-    return "compose down --volumes ok"
+    return "compose down ok (volumes preserved)"
 
 
 def clean_temp() -> str:
     cache = PROTOTYPE_DIR / ".pytest_cache"
+    if cache.is_symlink() or cache.is_junction():
+        raise Failure(f"refusing to remove linked cache: {cache}")
+    prototype = PROTOTYPE_DIR.resolve()
+    resolved_cache = cache.resolve()
+    if resolved_cache == prototype or not resolved_cache.is_relative_to(prototype):
+        raise Failure(f"cache resolves outside prototype directory: {resolved_cache}")
     if cache.is_dir():
-        shutil.rmtree(cache)
+        shutil.rmtree(resolved_cache)
     return "removed .pytest_cache"
 
 
@@ -321,36 +326,47 @@ def main(argv: list[str] | None = None) -> int:
     mode = "offline" if args.offline else "full"
     print(f"verify ({mode})  run {verify.run_id}  report {verify.report_dir.relative_to(ROOT)}")
 
-    # 1. environment
-    if not args.skip_env_check:
-        verify.step("env-check", env_check_common)
-        if not args.offline:
-            verify.step("env-docker", env_check_docker)
+    owns_stand = False
 
-    # 2. demo stand (full mode)
-    if not args.offline:
-        verify.step("stand-up", lambda: stand_up(args))
-        verify.step("readiness", lambda: wait_ready(args))
+    def start_stand() -> str:
+        nonlocal owns_stand
+        existing = run(["docker", "compose", "-f", str(COMPOSE_FILE),
+                        "ps", "--all", "--quiet"], timeout=60)
+        # Mark ownership before up, since a failed up can leave partial resources.
+        # Stopped containers also count as an existing user-owned stand.
+        owns_stand = not existing.stdout.strip()
+        return stand_up(args)
 
-    # 3. project test suite
-    verify.step("pytest", lambda: run_pytest(args, verify.report_dir))
+    try:
+        # Each phase requires the preceding phase to have succeeded.
+        if not args.skip_env_check:
+            verify.step("env-check", env_check_common)
+            if verify.ok and not args.offline:
+                verify.step("env-docker", env_check_docker)
 
-    # 4. saved suites through the isolated runner (never an LLM call)
-    if verify.ok and not args.skip_runner_set:
-        example_out = verify.report_dir / "runner-offline-example"
-        verify.step("runner-offline-example",
-                    lambda: run_runner_set(OFFLINE_EXAMPLE, example_out,
-                                           service=False, runner_timeout=args.runner_timeout))
-    if verify.ok and not args.skip_runner_set and not args.offline:
-        saved_out = verify.report_dir / "runner-saved-suite"
-        verify.step("runner-saved-suite",
-                    lambda: run_runner_set(resolve_saved_set(args), saved_out,
-                                           service=True, runner_timeout=args.runner_timeout))
+        if verify.ok and not args.offline:
+            verify.step("stand-up", start_stand)
+            if verify.ok:
+                verify.step("readiness", lambda: wait_ready(args))
 
-    # 5. cleanup of temporary resources (reports under .verify-runs/ are kept)
-    if not args.offline and not args.keep_stand:
-        verify.step("stand-down", stand_down)
-    verify.step("clean-temp", clean_temp)
+        if verify.ok:
+            verify.step("pytest", lambda: run_pytest(args, verify.report_dir))
+
+        if verify.ok and not args.skip_runner_set:
+            example_out = verify.report_dir / "runner-offline-example"
+            verify.step("runner-offline-example",
+                        lambda: run_runner_set(OFFLINE_EXAMPLE, example_out,
+                                               service=False, runner_timeout=args.runner_timeout))
+        if verify.ok and not args.skip_runner_set and not args.offline:
+            saved_out = verify.report_dir / "runner-saved-suite"
+            verify.step("runner-saved-suite",
+                        lambda: run_runner_set(resolve_saved_set(args), saved_out,
+                                               service=True, runner_timeout=args.runner_timeout))
+    finally:
+        # Reports and volumes are retained; only this run's stand is torn down.
+        if owns_stand and not args.keep_stand:
+            verify.step("stand-down", stand_down)
+        verify.step("clean-temp", clean_temp)
 
     summary = verify.write_summary(mode)
     result = "ok" if verify.ok else "failed"

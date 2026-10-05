@@ -12,8 +12,10 @@ visible to the repair loop instead of being hidden by storage's rejected/.
 
 import os
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from ..evaluate.runnability import compute_runnability
 from ..postprocess.fixes import (
@@ -123,6 +125,13 @@ def run_generation_pipeline(
     """
     from ..service_tools.runner.docker_runner import run_tests as default_run_tests
     from ..storage import SaveRequest, save_test_suite as default_save
+
+    # output_dir is a root, not a reusable attempt directory. Allocate even
+    # for a failed generation so every report remains an immutable run record.
+    run_dir = _run_dir(settings) / (
+        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex)
+    run_dir.mkdir(parents=True, exist_ok=False)
+    settings = replace(settings, output_dir=run_dir)
 
     # One model instance is shared by generation and every repair call, so a
     # caller can pass a model override or let the pipeline build the default.

@@ -191,6 +191,47 @@ def test_success_is_final_and_llm_is_called_only_for_generation(tmp_path):
     assert result.run_result["summary"]["failed"] == 0
 
 
+def test_repeated_generations_keep_separate_suites_and_reports(tmp_path):
+    seen = []
+    def runner(config):
+        names = sorted(path.name for path in config.tests_dir.glob('*.py'))
+        seen.append(names)
+        return RunResult("completed", 0, 0.1, tests=(
+            RunnerTestResult(f"{names[0]}::test_ok", "passed"),))
+    model = FakeModel()
+    model.generation_files = [{"name": "test_old.py", "code": "def test_ok(): assert True\n"}]
+    first = run_pipeline(tmp_path, model, runner, FakeSaver())
+    first_path = Path(first.report_paths['json'])
+    before = first_path.read_bytes()
+    model.generation_files = [{"name": "test_new.py", "code": "def test_ok(): assert True\n"}]
+    second = run_pipeline(tmp_path, model, runner, FakeSaver())
+    assert seen == [["test_old.py"], ["test_new.py"]]
+    assert first_path != Path(second.report_paths['json'])
+    assert first_path.read_bytes() == before
+
+
+def test_connection_failure_in_test_body_never_calls_repair(tmp_path):
+    model = FakeModel()
+    result = run_pipeline(tmp_path, model, ScriptedRunner(defect_message=
+        "requests.exceptions.ConnectionError: HTTPConnectionPool(host='catalogue', port=8080): Max retries exceeded"),
+        FakeSaver(), base_url="http://catalogue:8080")
+    assert result.attempts == 0
+    assert len(model.calls) == 1
+    assert result.environmental
+
+
+def test_pipeline_rejects_repair_that_removes_assertions(tmp_path):
+    model = FakeModel()
+    model.repair_responses = ["def test_bad(base_url, api_client):\n    assert True\n"]
+    runner = ScriptedRunner()
+    saver = FakeSaver()
+    result = run_pipeline(tmp_path, model, runner, saver)
+    assert result.status == "completed_with_failures"
+    assert len(runner.configs) == 1
+    assert len(saver.requests) == 1
+    assert result.repair_log[0].outcome == "error"
+
+
 def test_infrastructure_error_does_not_trigger_repair(tmp_path):
     model = FakeModel()
     runner = ScriptedRunner(infra=True)
@@ -276,10 +317,14 @@ def test_max_repair_attempts_bounds_the_loop(tmp_path):
     model = FakeModel()
     # Each repair changes the error signature, so the loop is not stuck early.
     model.repair_responses = [
-        "def test_bad(base_url, api_client):\n    assert 1 == 2\n",
-        "def test_bad(base_url, api_client):\n    assert 3 == 4\n",
+        BAD_FUNCTION.replace("999999", "111111"),
+        BAD_FUNCTION.replace("999999", "222222"),
     ]
-    runner = ScriptedRunner()
+    class VaryingRunner(ScriptedRunner):
+        def __call__(self, config):
+            self.defect_message = f"attempt {len(self.configs)}: assert 404 == 200"
+            return super().__call__(config)
+    runner = VaryingRunner()
     saver = FakeSaver()
     result = run_pipeline(tmp_path, model, runner, saver, max_repair_attempts=2)
 
@@ -292,8 +337,12 @@ def test_max_repair_attempts_bounds_the_loop(tmp_path):
 
 def test_token_budget_stops_the_loop(tmp_path):
     model = FakeModel()
-    model.repair_responses = ["def test_bad(base_url, api_client):\n    assert 1 == 2\n"]
-    runner = ScriptedRunner()
+    model.repair_responses = [BAD_FUNCTION.replace("999999", "111111")]
+    class VaryingRunner(ScriptedRunner):
+        def __call__(self, config):
+            self.defect_message = f"attempt {len(self.configs)}: assert 404 == 200"
+            return super().__call__(config)
+    runner = VaryingRunner()
     saver = FakeSaver()
 
     budget_one = run_pipeline(tmp_path, model, runner, saver, repair_token_budget=5)
@@ -410,8 +459,8 @@ def test_pipeline_saves_generation_report_with_runnability(tmp_path):
     saver = FakeSaver()
     result = run_pipeline(tmp_path, model, runner, saver)
 
-    json_path = tmp_path / "generation-report.json"
-    md_path = tmp_path / "generation-report.md"
+    json_path = Path(result.report_paths["json"])
+    md_path = Path(result.report_paths["markdown"])
     assert json_path.is_file()
     assert md_path.is_file()
     assert result.report_paths["json"] == str(json_path)
@@ -434,7 +483,7 @@ def test_pipeline_report_without_run_facts_has_no_percentage(tmp_path):
 
     assert result.runnability["runnability_percent"] is None
     payload = json.loads(
-        (tmp_path / "generation-report.json").read_text(encoding="utf-8")
+        Path(result.report_paths["json"]).read_text(encoding="utf-8")
     )
     assert payload["runnability"]["runnability_percent"] is None
     assert payload["runnability"]["expected_total"] == 2
