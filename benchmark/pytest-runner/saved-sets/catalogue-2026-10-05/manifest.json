@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-10-05_163817",
+  "created_at": "2026-10-05T16:38:17+07:00",
+  "contract": {
+    "path": "/home/aukvary/projects/api-contract-testgen/benchmark/catalogue/catalogue.swagger.json",
+    "sha256": "c52810441d6f1f5530f41d83dcc47b0bae2d3be494923aab649741a081b12672",
+    "title": "Catalogue resources",
+    "slug": "catalogue-resources"
+  },
+  "generator": {
+    "model": "deepseek-ai/DeepSeek-V4-Flash",
+    "meta": {
+      "attempt": 0
+    }
+  },
+  "files": [
+    {
+      "name": "test_catalogue.py",
+      "location": "tests",
+      "sha256": "f1d08ebad4d12d0124242e028239fade3df387d258c3602fd313eeb114db91c8",
+      "status": "ok",
+      "test_functions": 4,
+      "warnings": [],
+      "error": null
+    },
+    {
+      "name": "test_tags.py",
+      "location": "tests",
+      "sha256": "4b60b19c0b7105ffb6aef18872c209273b9b33228be62878c01f653848535d86",
+      "status": "ok",
+      "test_functions": 1,
+      "warnings": [],
+      "error": null
+    }
+  ],
+  "collection": {
+    "status": "skipped",
+    "collected": null,
+    "nodeids": [],
+    "errors": [],
+    "duration_seconds": 0.0
+  },
+  "summary": {
+    "files_total": 2,
+    "files_ok": 2,
+    "files_no_tests": 0,
+    "files_rejected": 0,
+    "test_functions": 5,
+    "collected": null
+  }
+}

@@ -298,12 +298,72 @@ xfail, ошибка или прерывание не допускает поль
 возвращает исходный HTTP 3xx, включая вызов с `allow_redirects=True`.
 Самостоятельный HTTP-клиент также ограничен firewall.
 
-### Полная проверка этапов 1–5
+### Полная проверка одной командой
 
-Из каталога `prototype`, при запущенном Docker Desktop:
+Все проверки собираются в одну команду из корня репозитория. Скрипт
+использует только стандартную библиотеку и никогда не вызывает LLM:
+
+```bash
+# Полный цикл: окружение -> стенд -> готовность -> pytest -> сохранённые
+# наборы через runner -> отчёты -> удаление стенда и временных ресурсов.
+uv run --project prototype --locked --no-sync python tools/verify.py
+
+# Быстрый режим без стенда и Docker (юнит-тесты + offline-пример runner):
+uv run --project prototype --locked --no-sync python tools/verify.py --offline
+```
+
+Разовые действия до первого запуска (повторные запуски их не требуют):
+
+```bash
+cd prototype && uv sync --locked   # один раз создать окружение (Python 3.14.7)
+docker build -t api-contract-pytest-runner:step5 prototype/src/prototype/service_tools/runner  # один раз собрать образ
+```
+
+Повторные запуски не требуют правки файлов, `.env`/ключей LLM и установки
+зависимостей: тестовые шаги идут с `--no-sync` (окружение только
+синхронизируется отдельным шагом), образ и стенд не пересобираются.
+
+Что делает команда:
+
+1. **Проверка окружения**: интерпретатор `3.14.7` (по `prototype/.python-version`),
+   наличие `uv`, для полного режима — Docker, валидность
+   `benchmark/catalogue/compose.yaml` и наличие образа
+   `api-contract-pytest-runner:step5`.
+2. **Стенд**: `docker compose -f benchmark/catalogue/compose.yaml up -d --wait`
+   и ожидание готовности через `benchmark/catalogue/check_ready.py`
+   (health catalogue и базы, непустой список товаров).
+3. **Тесты**: `pytest -q` с флагами `RUN_RUNNER_DOCKER_TESTS=1
+   RUN_RUNNER_CATALOGUE_TESTS=1` и `--junitxml` в каталог прогона.
+4. **Сохранённые наборы через runner**: offline-пример
+   `benchmark/pytest-runner/example` и коммитный снимок реальной генерации
+   `benchmark/pytest-runner/saved-sets/catalogue-2026-10-05` в service-режиме
+   (`--base-url http://catalogue:8080 --network ... --blocked-network ...`).
+   Платная генерация не выполняется.
+5. **Отчёт**: `.verify-runs/<UTC-идентификатор>/` — `summary.json`,
+   `junit.xml` и отчёты runner (`report.json`, `report.md`).
+6. **Очистка**: `docker compose ... down --volumes` (стенд + именованный том)
+   и `.pytest_cache`; отчёты остаются. `--keep-stand` оставляет стенд.
+
+Флаги: `--offline`, `--skip-runner-set` (только юнит-тесты, без Docker),
+`--keep-stand`, `--saved-set PATH`, `--readiness-timeout`, `--runner-timeout`.
+Код возврата `0` — только если все шаги, включая очистку, прошли.
+
+Ограничение окружения: полный режим требует, чтобы хост разрешал новые
+соединения из Docker-мостов на адреса шлюзов (штатное поведение Docker
+Desktop и GitHub-hosted runner). На хостах с включённым брандмауэром (например
+`ufw` с политикой `DROP` на вход) интеграционный тест
+`test_firewall_blocks_live_destinations_before_import` не сможет на контрольном
+шаге дотянуться до слушателя хоста через gateway — этому окружению нужна
+разрешающая запись для мостов Docker в `ufw`.
+
+### Проверка этапов 1–5: детали
+
+В полном режиме команда выполняет тот же состав, что и ручной процесс ниже
+(сохранён для справки и Windows):
 
 ```powershell
-py -3.12 -m uv sync --locked
+cd prototype
+# Один раз: py -3.12 -m uv sync --locked (uv из Python 3.12)
 docker build -t api-contract-pytest-runner:step5 src/prototype/service_tools/runner
 docker compose -f ../benchmark/catalogue/compose.yaml up -d --wait --wait-timeout 120
 py -3.12 -m uv run --locked python ../benchmark/catalogue/check_ready.py --timeout 120
@@ -333,6 +393,29 @@ Python 3.14.7 и pytest 9.1.1: **165 passed, 13 skipped**, без ошибок,
 контейнеров. Стенд вернул `status: ready`, 9 товаров; сохранённый пример
 через CLI — `completed`, `exit_code: 0`, 3 passed. Это проверка этапов 1–5
 на готовых pytest-файлах, без генерации и self-repair.
+
+### CI и сохранённые наборы (без платной генерации)
+
+Обычный CI (`.github/workflows/ci.yml`, PR/push) использует сохранённые
+наборы и никогда не вызывает генерацию через LLM (`.env` и ключи не нужны):
+
+- job `unit` — `tools/verify.py --offline --skip-runner-set`: юнит-тесты
+  проекта без Docker и стенда (на 2026-10-05 — 339 passed, 12 skipped);
+- job `saved-sets` — сборка образа runner, стенд Catalogue и полный
+  `tools/verify.py` с интеграционными флагами и прогоном сохранённых наборов.
+
+Полный прогон на `main` и по `workflow_dispatch` — `.github/workflows/verify.yml`.
+
+Сохранённые наборы живут в `benchmark/pytest-runner/saved-sets/`
+(подробности — в `README.md` каталога): это коммитный снимок версии реальной
+генерации `2026-10-05_163817`, приведённый к документированной форме контракта
+(`/catalogue/size` → `{"size": int}`, `/tags` → `{"tags": [string]}`). Сырой
+вывод генерации остаётся в `prototype/generated/` (в gitignore).
+
+Версии Python согласованы: `prototype/.python-version` = `3.14.7`,
+`actions/setup-python` читает этот файл, образ runner — `python:3.14.7-slim`
+(фиксированный digest). Пути тестов задаются один раз в `tools/verify.py`
+и переиспользуются CI из корня репозитория.
 
 ### Сохранение отчётов — этап 6
 

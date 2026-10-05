@@ -1,0 +1,35 @@
+name: Verify (full)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Полная проверка на main/вручную: та же команда tools/verify.py, что и в
+# обычном CI, без оплачиваемой генерации — только сохранённые наборы.
+jobs:
+  verify:
+    name: Full verify (stand, saved sets, no LLM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version-file: prototype/.python-version
+      - name: Install uv
+        run: python -m pip install uv
+      - name: Sync environment (once)
+        working-directory: prototype
+        run: uv sync --locked
+      - name: Build runner image
+        run: docker build -t api-contract-pytest-runner:step5 prototype/src/prototype/service_tools/runner
+      - name: Run verify (full)
+        run: uv run --project prototype --locked --no-sync python tools/verify.py
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-full-reports
+          path: .verify-runs
+          if-no-files-found: warn

@@ -19,3 +19,22 @@
 - [Установка, запуск агента и проверки](prototype/ReadMe.md).
 - [Соглашение о pytest-runner для команды](docs/adr/0002-pytest-runner-contract.md).
 - [Сохранение сгенерированных тестов](docs/adr/0003-generated-tests-storage.md).
+
+## Проверка одной командой
+
+Из корня репозитория (подробнее — в [prototype/ReadMe.md](prototype/ReadMe.md)):
+
+```bash
+# Полный цикл: окружение -> стенд Catalogue -> готовность -> pytest ->
+# сохранённые наборы через runner -> отчёты -> очистка. LLM не вызывается.
+uv run --project prototype --locked --no-sync python tools/verify.py
+
+# Быстрый режим без стенда и Docker (юнит-тесты):
+uv run --project prototype --locked --no-sync python tools/verify.py --offline --skip-runner-set
+```
+
+Один раз до первого запуска: `uv sync --locked` в `prototype/` и сборка образа
+runner (`docker build -t api-contract-pytest-runner:step5 prototype/src/prototype/service_tools/runner`).
+Повторные запуски не требуют правки файлов, ключей LLM и установки
+зависимостей. Обычный CI (`.github/workflows/ci.yml`) использует сохранённые
+наборы тестов `benchmark/pytest-runner/saved-sets/` без платной генерации.

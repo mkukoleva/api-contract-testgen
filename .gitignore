@@ -11,6 +11,7 @@ venv/
 .hypothesis/
 .coverage*
 .runner-results/
+.verify-runs/
 
 # Артефакты генерации и прогонов конвейера генерации
 prototype/.pipeline-runs/
