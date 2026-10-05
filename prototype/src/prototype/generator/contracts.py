@@ -191,6 +191,13 @@ class GenerationRun:
     saved_versions: tuple[dict[str, Any], ...] = ()
     generator_errors: tuple[str, ...] = ()
     run_result: dict[str, Any] | None = None
+    # Expected pytest nodeids of the final suite (runnability denominator).
+    test_cases: tuple[str, ...] = ()
+    # Runnability facts (prototype.evaluate.runnability), always a dict from
+    # the pipeline; None only when constructed without calculation.
+    runnability: dict[str, Any] | None = None
+    # Paths of the JSON/Markdown generation report if one was saved.
+    report_paths: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -210,4 +217,7 @@ class GenerationRun:
             "saved_versions": list(self.saved_versions),
             "generator_errors": list(self.generator_errors),
             "run_result": self.run_result,
+            "test_cases": list(self.test_cases),
+            "runnability": self.runnability,
+            "report_paths": self.report_paths,
         }

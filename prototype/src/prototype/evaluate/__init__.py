@@ -8,6 +8,12 @@ from prototype.evaluate.metrics import (
     format_metrics_markdown,
     save_metrics_report,
 )
+from prototype.evaluate.runnability import (
+    RAN_OUTCOMES,
+    RunnabilityResult,
+    compute_runnability,
+    nodeid_matches,
+)
 from prototype.evaluate.mutation import (
     Mutant,
     MutationScoreResult,
@@ -26,6 +32,11 @@ __all__ = [
     "calculate_metrics",
     "format_metrics_markdown",
     "save_metrics_report",
+    # Запускаемость сгенерированных тестов (п. 2.1.2)
+    "RunnabilityResult",
+    "compute_runnability",
+    "nodeid_matches",
+    "RAN_OUTCOMES",
     # Операторы мутации контракта и оценка устойчивости тестов (2.2.9)
     "Mutant",
     "MutationScoreResult",

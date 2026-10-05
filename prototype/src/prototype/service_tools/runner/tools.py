@@ -537,9 +537,11 @@ def generate_tests_tool(
         "attempts": run.attempts,
         "tokens": run.to_dict()["tokens"],
         "summary": (run.run_result or {}).get("summary", {}),
+        "runnability": run.runnability,
         "repair_log": [attempt.to_dict() for attempt in run.repair_log],
         "suspected_defects": list(run.suspected_defects),
         "environmental": list(run.environmental),
         "saved_versions": list(run.saved_versions),
         "generator_errors": list(run.generator_errors),
+        "report_paths": run.report_paths,
     }

@@ -30,6 +30,14 @@ def _fake_run(status="success", **overrides):
         saved_versions=({"attempt": 0, "run_id": "run-1", "tests_dir": "generated/x"},),
         generator_errors=(),
         run_result={"status": "completed", "summary": {"total": 1, "passed": 1}},
+        test_cases=("test_a.py::test_x",),
+        runnability={
+            "expected_total": 1, "ran_total": 1,
+            "ran_nodeids": ["test_a.py::test_x"], "not_ran_nodeids": [],
+            "runnability_percent": 100.0, "reason": None,
+        },
+        report_paths={"json": "out/generation-report.json",
+                      "markdown": "out/generation-report.md"},
     )
     base.update(overrides)
     return GenerationRun(**base)
@@ -75,6 +83,8 @@ def test_generate_tests_tool_returns_compact_result(monkeypatch):
     assert result["repair_log"][0]["target"] == "test_a.py::test_x"
     assert result["suspected_defects"][0]["nodeid"] == "test_a.py::test_defect"
     assert result["saved_versions"][0]["run_id"] == "run-1"
+    assert result["runnability"]["runnability_percent"] == 100.0
+    assert result["report_paths"]["json"] == "out/generation-report.json"
     # The generated test code never reaches the agent.
     import json
 

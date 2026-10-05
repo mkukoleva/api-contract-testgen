@@ -11,15 +11,18 @@ visible to the repair loop instead of being hidden by storage's rejected/.
 """
 
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
+from ..evaluate.runnability import compute_runnability
 from ..postprocess.fixes import (
     PreparedFile,
     as_generated_files,
     prepare_file,
     write_attempt_dir,
 )
+from ..reports.generation_report import save_generation_report
 from ..service_tools.runner.contracts import (
     RunConfig,
     RunResult,
@@ -52,6 +55,42 @@ def _run_dir(settings: GenerationSettings) -> Path:
     if settings.output_dir is not None:
         return settings.output_dir
     return Path.cwd() / ".pipeline-runs"
+
+
+def _expected_cases(files_map: dict[str, str]) -> tuple[str, ...]:
+    """Static pytest nodeids of the current suite (runnability denominator).
+
+    Computed from the final prepared files, so repairs that keep a test
+    function (the repair contract preserves the name) do not change the set.
+    Files with a syntax error contribute no nodeids: their tests are unknowable
+    and surface separately through collection/compatibility diagnostics.
+    """
+    cases: list[str] = []
+    for name in sorted(files_map):
+        cases.extend(prepare_file(name, files_map[name]).test_cases)
+    return tuple(cases)
+
+
+def _save_report(run: GenerationRun, settings: GenerationSettings) -> GenerationRun:
+    """Write the JSON + Markdown generation report; never abort the result.
+
+    A failed write is recorded as a generator error instead of being raised,
+    keeping the pipeline's verdict usable while staying honest about the audit.
+    """
+    try:
+        paths = save_generation_report(run, _run_dir(settings))
+    except Exception as exc:  # report is auxiliary; the run result must survive
+        return replace(
+            run,
+            generator_errors=(
+                *run.generator_errors,
+                f"saving the generation report failed: {exc}",
+            ),
+        )
+    return replace(
+        run,
+        report_paths={key: str(path) for key, path in paths.items()},
+    )
 
 
 def _repair_log_from(log: list[dict[str, Any]]) -> tuple[RepairAttempt, ...]:
@@ -113,15 +152,20 @@ def run_generation_pipeline(
 
     if not prepared:
         status = "generation_error" if generator_errors else "no_tests"
-        return GenerationRun(
-            status=status,
-            contract_path=settings.contract_path,
-            model=settings.model,
-            attempts=0,
-            input_tokens=gen_input,
-            output_tokens=gen_output,
-            total_tokens=gen_total,
-            generator_errors=tuple(generator_errors),
+        return _save_report(
+            GenerationRun(
+                status=status,
+                contract_path=settings.contract_path,
+                model=settings.model,
+                attempts=0,
+                input_tokens=gen_input,
+                output_tokens=gen_output,
+                total_tokens=gen_total,
+                generator_errors=tuple(generator_errors),
+                test_cases=(),
+                runnability=compute_runnability((), None).to_dict(),
+            ),
+            settings,
         )
 
     files_map: dict[str, str] = {item.name: item.code for item in prepared}
@@ -262,19 +306,26 @@ def run_generation_pipeline(
         attempt_index += 1
         continue
 
-    return GenerationRun(
-        status=status,
-        contract_path=settings.contract_path,
-        model=settings.model,
-        attempts=attempts_used,
-        input_tokens=gen_input + repair_input,
-        output_tokens=gen_output + used_output,
-        total_tokens=gen_total + repair_total,
-        tests=final_run.to_dict()["tests"] if final_run is not None else (),
-        repair_log=_repair_log_from(log),
-        suspected_defects=tuple(defects),
-        environmental=tuple(environmental),
-        saved_versions=tuple(saved_versions),
-        generator_errors=tuple(generator_errors),
-        run_result=final_run.to_dict() if final_run is not None else None,
+    expected = _expected_cases(files_map)
+    run_result_dict = final_run.to_dict() if final_run is not None else None
+    return _save_report(
+        GenerationRun(
+            status=status,
+            contract_path=settings.contract_path,
+            model=settings.model,
+            attempts=attempts_used,
+            input_tokens=gen_input + repair_input,
+            output_tokens=gen_output + used_output,
+            total_tokens=gen_total + repair_total,
+            tests=run_result_dict["tests"] if run_result_dict is not None else (),
+            repair_log=_repair_log_from(log),
+            suspected_defects=tuple(defects),
+            environmental=tuple(environmental),
+            saved_versions=tuple(saved_versions),
+            generator_errors=tuple(generator_errors),
+            run_result=run_result_dict,
+            test_cases=expected,
+            runnability=compute_runnability(expected, run_result_dict).to_dict(),
+        ),
+        settings,
     )

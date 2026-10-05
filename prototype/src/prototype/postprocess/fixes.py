@@ -25,6 +25,8 @@ class PreparedFile:
     status: Status
     test_functions: int | None
     error: str | None
+    # Expected pytest nodeids of this module (the runnability denominator).
+    test_cases: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -45,6 +47,7 @@ def prepare_file(name: str, code: str) -> PreparedFile:
         status=analysis.status,
         test_functions=analysis.test_functions,
         error=analysis.error,
+        test_cases=analysis.test_cases,
     )
 
 

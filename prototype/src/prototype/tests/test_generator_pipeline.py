@@ -203,6 +203,9 @@ def test_infrastructure_error_does_not_trigger_repair(tmp_path):
     assert result.repair_log == ()
     assert len(runner.configs) == 1
     assert result.generator_errors == ()
+    # No run facts: runnability must not invent a percentage.
+    assert result.runnability["runnability_percent"] is None
+    assert "тесты не выполнялись" in result.runnability["reason"]
 
 
 def test_service_defect_is_reported_and_assert_is_kept(tmp_path):
@@ -223,6 +226,13 @@ def test_service_defect_is_reported_and_assert_is_kept(tmp_path):
     assert result.suspected_defects[0]["nodeid"] == "test_catalogue.py::test_bad"
     assert "not documented" in result.suspected_defects[0]["reason"]
     assert result.repair_log == ()
+    # A test that surfaced the service defect still *ran*: runnability is 100%.
+    assert result.test_cases == (
+        "test_catalogue.py::test_good",
+        "test_catalogue.py::test_bad",
+    )
+    assert result.runnability["runnability_percent"] == 100.0
+    assert result.runnability["ran_total"] == 2
 
 
 def test_repair_fixes_only_the_failing_function(tmp_path):
@@ -392,3 +402,56 @@ def test_default_model_is_shared_by_generation_and_repair(tmp_path, monkeypatch)
     assert result.repair_log[0].outcome == "repaired"
     kinds = [kind for kind, _ in fake.calls]
     assert kinds == ["generation", "repair"]
+
+
+def test_pipeline_saves_generation_report_with_runnability(tmp_path):
+    model = FakeModel()
+    runner = ScriptedRunner()
+    saver = FakeSaver()
+    result = run_pipeline(tmp_path, model, runner, saver)
+
+    json_path = tmp_path / "generation-report.json"
+    md_path = tmp_path / "generation-report.md"
+    assert json_path.is_file()
+    assert md_path.is_file()
+    assert result.report_paths["json"] == str(json_path)
+    assert result.report_paths["markdown"] == str(md_path)
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert payload["expected_test_cases"] == [
+        "test_catalogue.py::test_good",
+        "test_catalogue.py::test_bad",
+    ]
+    assert payload["runnability"]["runnability_percent"] == 100.0
+    assert payload["suspected_defects"] == []  # honest empty lists
+    assert "Запускаемость (Runnability)" in md_path.read_text(encoding="utf-8")
+
+
+def test_pipeline_report_without_run_facts_has_no_percentage(tmp_path):
+    model = FakeModel()
+    runner = ScriptedRunner(infra=True)
+    result = run_pipeline(tmp_path, model, runner, FakeSaver())
+
+    assert result.runnability["runnability_percent"] is None
+    payload = json.loads(
+        (tmp_path / "generation-report.json").read_text(encoding="utf-8")
+    )
+    assert payload["runnability"]["runnability_percent"] is None
+    assert payload["runnability"]["expected_total"] == 2
+
+
+def test_syntax_error_file_produces_no_expected_cases(tmp_path):
+    """A file pytest cannot parse contributes no denominator: its tests are
+    unknowable, so runnability is not fabricated from missing data and a
+    no-tests outcome is not a successful verification."""
+    model = FakeModel()
+    model.generation_files = [{
+        "name": "test_broken.py",
+        "code": "def test_a(:\n    pass\n",
+    }]
+    runner = ScriptedRunner()
+    result = run_pipeline(tmp_path, model, runner, FakeSaver())
+    assert result.status == "no_tests"
+    assert result.runnability["expected_total"] == 0
+    assert result.runnability["runnability_percent"] is None
+    assert result.runnability["ran_total"] == 0

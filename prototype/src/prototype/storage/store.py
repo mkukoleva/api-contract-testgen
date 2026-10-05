@@ -118,6 +118,7 @@ def save_test_suite(request: SaveRequest) -> SavedSuite:
                 "sha256": hashlib.sha256(data).hexdigest(),
                 "status": analysis.status,
                 "test_functions": analysis.test_functions,
+                "test_cases": list(analysis.test_cases),
                 "warnings": list(analysis.warnings),
                 "error": analysis.error,
             })

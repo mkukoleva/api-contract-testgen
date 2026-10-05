@@ -131,6 +131,11 @@ def test_analysis_counts_functions_methods_and_async_tests():
     assert result.test_functions == 3
     assert result.warnings == ()
     assert result.error is None
+    assert result.test_cases == (
+        "test_a.py::test_one",
+        "test_a.py::test_two",
+        "test_a.py::TestTags::test_three",
+    )
 
 
 def test_analysis_marks_file_without_tests():
@@ -138,6 +143,7 @@ def test_analysis_marks_file_without_tests():
 
     result = analyze_test_file("import pytest\n", "test_a.py")
     assert (result.status, result.test_functions) == ("no_tests", 0)
+    assert result.test_cases == ()
 
 
 @pytest.mark.parametrize("code", [
@@ -374,7 +380,12 @@ def test_save_writes_version_with_manifest(tmp_path, monkeypatch):
     assert manifest["files"] == [{
         "name": "test_catalogue.py", "location": "tests",
         "sha256": hashlib.sha256(stored).hexdigest(), "status": "ok",
-        "test_functions": 2, "warnings": [], "error": None,
+        "test_functions": 2,
+        "test_cases": [
+            "test_catalogue.py::test_list",
+            "test_catalogue.py::TestTags::test_tags",
+        ],
+        "warnings": [], "error": None,
     }]
     assert manifest["collection"]["status"] == "ok"
     assert manifest["collection"]["nodeids"] == [
