@@ -357,7 +357,7 @@ def test_save_writes_version_with_manifest(tmp_path, monkeypatch):
 
     monkeypatch.setattr(store, "_now", lambda: FIXED_TIME)
     saved = save(tmp_path / "generated", ("test_catalogue.py", GOOD),
-                 model="deepseek", generator_meta={"prompt": "v1"})
+                 model="deepseek", generator_meta={"prompt": "v1"}, collect=True)
 
     run_dir = tmp_path / "generated" / "demo-catalogue-api" / "2026-09-28_120000"
     assert saved.run_id == "2026-09-28_120000"
@@ -401,7 +401,8 @@ def test_save_writes_version_with_manifest(tmp_path, monkeypatch):
 
 
 def test_save_moves_syntax_errors_to_rejected_and_collects_the_rest(tmp_path):
-    saved = save(tmp_path, ("test_good.py", GOOD), ("test_broken.py", "def test_a(:\n"))
+    saved = save(tmp_path, ("test_good.py", GOOD), ("test_broken.py", "def test_a(:\n"),
+                 collect=True)
 
     assert (saved.run_dir / "rejected" / "test_broken.py").is_file()
     assert not (saved.tests_dir / "test_broken.py").exists()
@@ -415,14 +416,15 @@ def test_save_moves_syntax_errors_to_rejected_and_collects_the_rest(tmp_path):
 
 
 def test_save_records_import_errors_for_self_repair(tmp_path):
-    saved = save(tmp_path, ("test_a.py", "import nonexistent_module_xyz\n\ndef test_a():\n    pass\n"))
+    saved = save(tmp_path, ("test_a.py", "import nonexistent_module_xyz\n\ndef test_a():\n    pass\n"),
+                 collect=True)
 
     assert saved.manifest["collection"]["status"] == "errors"
     assert "nonexistent_module_xyz" in saved.manifest["collection"]["errors"][0]
 
 
 def test_save_marks_file_without_tests(tmp_path):
-    saved = save(tmp_path, ("test_a.py", "X = 1\n"))
+    saved = save(tmp_path, ("test_a.py", "X = 1\n"), collect=True)
 
     assert saved.manifest["files"][0]["status"] == "no_tests"
     assert saved.manifest["collection"]["status"] == "no_tests"
@@ -457,7 +459,7 @@ def test_save_never_overwrites_a_version_with_the_same_timestamp(tmp_path, monke
 
 def test_save_timeout_is_recorded_with_top_level_warning(tmp_path):
     saved = save(tmp_path, ("test_a.py", "import time\ntime.sleep(30)\n\ndef test_a():\n    pass\n"),
-                 collect_timeout_seconds=1)
+                 collect=True, collect_timeout_seconds=1)
 
     assert saved.manifest["collection"]["status"] == "timeout"
     assert saved.manifest["files"][0]["warnings"] == ["top_level_code"]
@@ -465,7 +467,7 @@ def test_save_timeout_is_recorded_with_top_level_warning(tmp_path):
 
 
 def test_save_normalizes_line_endings_and_bom(tmp_path):
-    saved = save(tmp_path, ("test_a.py", "﻿def test_a():\r\n    pass\r\n"))
+    saved = save(tmp_path, ("test_a.py", "﻿def test_a():\r\n    pass\r\n"), collect=True)
 
     stored = (saved.tests_dir / "test_a.py").read_bytes()
     assert stored == b"def test_a():\n    pass\n"
@@ -473,7 +475,7 @@ def test_save_normalizes_line_endings_and_bom(tmp_path):
 
 
 def test_save_works_under_non_ascii_directories(tmp_path):
-    saved = save(tmp_path / "сохранено", ("test_a.py", GOOD))
+    saved = save(tmp_path / "сохранено", ("test_a.py", GOOD), collect=True)
 
     assert saved.manifest["collection"]["status"] == "ok"
     assert saved.manifest["collection"]["collected"] == 2
@@ -493,7 +495,7 @@ def test_save_cleans_up_when_interrupted(tmp_path, monkeypatch):
 
     monkeypatch.setattr(store, "collect_tests", boom)
     with pytest.raises(RuntimeError, match="collector crashed"):
-        save(tmp_path, ("test_a.py", GOOD))
+        save(tmp_path, ("test_a.py", GOOD), collect=True)
     assert list((tmp_path / "demo-catalogue-api").iterdir()) == []
 
 
@@ -564,8 +566,9 @@ def test_save_tests_tool_returns_compact_result(tmp_path, monkeypatch):
     assert result["tool"] == "save_tests_tool"
     assert result["status"] == "success"
     assert Path(result["tests_dir"]).is_dir()
-    assert result["collection_status"] == "ok"
-    assert result["summary"]["collected"] == 2
+    # Collection is left to the isolated runner, so nothing is collected here.
+    assert result["collection_status"] == "skipped"
+    assert result["summary"]["collected"] is None
     # SyntaxError text differs between Python versions; only the prefix is stable.
     assert len(result["errors"]) == 1
     assert result["errors"][0].startswith("test_broken.py: line 1:")
@@ -610,3 +613,36 @@ def test_project_pytest_does_not_collect_saved_versions(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "src/prototype/tests/test_own.py::test_own" in result.stdout
     assert "generated" not in result.stdout
+
+
+def marker_code(marker):
+    # Module-level code a generator could produce; it must not run on the host.
+    return (
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran')\n\n"
+        "def test_a():\n    pass\n"
+    )
+
+
+def test_save_does_not_execute_generated_code_by_default(tmp_path):
+    marker = tmp_path / "executed.txt"
+    saved = save(tmp_path / "out", ("test_a.py", marker_code(marker)))
+
+    assert not marker.exists()
+    assert saved.manifest["collection"]["status"] == "skipped"
+    assert saved.manifest["files"][0]["warnings"] == ["top_level_code"]
+
+
+def test_save_tests_tool_does_not_execute_generated_code(tmp_path, monkeypatch):
+    pytest.importorskip("langchain")
+    from prototype.service_tools.runner.tools import save_tests_tool
+
+    monkeypatch.setenv("TESTGEN_OUTPUT_DIR", str(tmp_path / "out"))
+    marker = tmp_path / "executed.txt"
+    result = save_tests_tool.invoke({
+        "contract_path": str(CONTRACT),
+        "files": [{"name": "test_a.py", "code": marker_code(marker)}],
+    })
+
+    assert result["status"] == "success"
+    assert result["collection_status"] == "skipped"
+    assert not marker.exists()

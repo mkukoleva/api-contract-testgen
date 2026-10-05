@@ -44,14 +44,19 @@ class GeneratedFile:
 
 @dataclass(frozen=True)
 class SaveRequest:
-    """Everything save_test_suite needs to store one generation run."""
+    """Everything save_test_suite needs to store one generation run.
+
+    collect=True runs `pytest --collect-only` on the host, which imports the
+    generated modules and executes their top-level code outside any isolation.
+    Keep the default False: collection and execution belong to the Docker runner.
+    """
 
     contract_path: Path | str
     files: tuple[GeneratedFile, ...]
     model: str | None = None
     generator_meta: Mapping[str, Any] = field(default_factory=dict)
     output_root: Path | str | None = None
-    collect: bool = True
+    collect: bool = False
     collect_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
