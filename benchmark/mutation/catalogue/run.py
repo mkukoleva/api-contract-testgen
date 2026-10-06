@@ -4,7 +4,7 @@ import argparse
 import copy
 from dataclasses import replace
 import math
-import threading
+from threading import Lock
 from contextlib import contextmanager
 import hashlib
 import json
@@ -200,7 +200,7 @@ def execute(plan, directory, *, contract, image, project, network, timeout, test
             raise RuntimeError('Cannot remove temporary mutation network: ' + removed_network.stderr)
 
 
-def fingerprint(image, timeout=60, workers=4, tests=TESTS):
+def fingerprint(image, timeout=60, tests=TESTS, workers=4):
     paths = [p for p in tests.rglob('*') if p.is_file() and not any(x in {'__pycache__', '.pytest_cache'} for x in p.parts)] + list(HERE.glob('*.py')) + [CONTRACT,
             ROOT / 'benchmark/catalogue/compose.yaml']
     paths += list((ROOT / 'prototype/src/prototype/evaluate').glob('mutation*.py'))
@@ -237,7 +237,7 @@ def main():
     parser.add_argument('--tests', type=Path, default=TESTS)
     parser.add_argument('--timeout', type=float, default=60)
     parser.add_argument('--build', action='store_true')
-    parser.add_argument('--workers', type=int, default=4, choices=range(1, 9))
+    parser.add_argument('--workers', type=int, default=4, choices=range(1, 5))
     args = parser.parse_args()
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('timeout must be finite and positive')
@@ -263,7 +263,7 @@ def main():
     image = build_image(session / 'build') if args.build else image_id(IMAGE)
     originals = {}
     integrity = {'stable': True}
-    integrity_lock = threading.Lock()
+    integrity_lock = Lock()
     with infrastructure(session, image) as (project, network):
         def checked_execute(plan, directory):
             result = execute(plan, directory, contract=contract, image=image, project=project,
@@ -286,9 +286,8 @@ def main():
             return result
         report = run_mutation_campaign(contract,
             execute=checked_execute,
-            fingerprint=lambda: fingerprint(image, args.timeout, args.workers, tests) + str(integrity['stable']), output_dir=session,
-            description=f'Real isolated Catalogue; fixed suite {tests.name}; pinned Swagger conversion; GET only',
-            max_workers=args.workers)
+            fingerprint=lambda: fingerprint(image, args.timeout, tests, args.workers) + str(integrity['stable']),
+            output_dir=session, max_workers=args.workers)
     (session / 'original-responses.json').write_text(json.dumps({'stable': integrity['stable'], 'comparison': 'Exact except tag/tags string-array order; duplicates retained', 'responses': originals}, indent=2))
     (session / 'provenance.json').write_text(json.dumps({'image_id': image, 'contract_source': str(CONTRACT),
         'tests_source': str(tests), 'timeout': args.timeout, 'workers': args.workers, 'report_dir': report['report_dir']}, indent=2))
