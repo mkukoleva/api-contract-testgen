@@ -146,3 +146,19 @@ def test_render_contract_for_generation_lists_operations():
     assert "-> 200" in rendered
     # The full file is not in the prompt: schema details are condensed.
     assert "requestBody" not in rendered
+
+
+def test_generation_context_sorts_mixed_status_keys_without_losing_responses():
+    contract = {"info": {}, "paths": {"/items": {"get": {"responses": {
+        "404": {"description": "Missing"}, 200: {"description": "OK"},
+        "201": {"description": "Created"}, "default": {"description": "Other"},
+    }}}}}
+    rendered = render_contract_for_generation(contract)
+    assert "GET /items -> 200 201 404 default" in rendered
+
+
+def test_generation_context_supports_default_and_status_ranges():
+    contract = {"info": {}, "paths": {"/items": {"get": {"responses": {
+        "default": {}, "2XX": {}, "404": {},
+    }}}}}
+    assert "GET /items -> 2XX 404 default" in render_contract_for_generation(contract)

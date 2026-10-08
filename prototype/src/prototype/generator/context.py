@@ -244,11 +244,13 @@ def render_contract_for_generation(
             operation = path_item[method]
             if not isinstance(operation, dict):
                 continue
-            statuses = sorted(
-                code
+            statuses = sorted({
+                str(code)
                 for code in (operation.get("responses") or {})
-                if str(code).isdigit()
-            ) if isinstance(operation.get("responses"), dict) else []
+                if (str(code).isdigit() or str(code) == "default"
+                    or (len(str(code)) == 3 and str(code)[0] in "12345"
+                        and str(code)[1:] == "XX"))
+            }) if isinstance(operation.get("responses"), dict) else []
             suffix = " ".join(str(code) for code in statuses)
             lines.append(f"- {method.upper()} {route}{f' -> {suffix}' if suffix else ''}")
             summary = operation.get("summary")

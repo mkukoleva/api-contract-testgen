@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -51,6 +52,22 @@ PYTHON_TARGET = "3.14.7"
 TARGET_VERSION = tuple(int(part) for part in PYTHON_TARGET.split("."))
 
 STEP_OK, STEP_FAIL, STEP_SKIP = "ok", "fail", "skip"
+
+
+def display_path(path: Path) -> str:
+    """Use a short repository path or retain an external absolute path."""
+    return str(path.relative_to(ROOT) if path.is_relative_to(ROOT) else path)
+
+
+def positive_seconds(value: str) -> float:
+    """Reject unusable time limits during argument parsing, before side effects."""
+    try:
+        seconds = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be a positive finite number") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a positive finite number")
+    return seconds
 
 
 class Failure(Exception):
@@ -220,9 +237,9 @@ def wait_ready(args: argparse.Namespace) -> str:
 
 def run_pytest(args: argparse.Namespace, report_dir: Path) -> str:
     junit = report_dir / "junit.xml"
-    env: dict[str, str] = {}
-    if not args.offline:
-        env.update(RUN_RUNNER_DOCKER_TESTS="1", RUN_RUNNER_CATALOGUE_TESTS="1")
+    # Override inherited flags in both modes, including a developer's shell.
+    enabled = "0" if args.offline else "1"
+    env = {"RUN_RUNNER_DOCKER_TESTS": enabled, "RUN_RUNNER_CATALOGUE_TESTS": enabled}
     cmd = [sys.executable, "-m", "pytest", "-q", "--junitxml", str(junit)]
     cmd.extend(args.pytest_extra)
     proc = run(cmd, cwd=PROTOTYPE_DIR, env=env or None, timeout=args.pytest_timeout)
@@ -267,7 +284,7 @@ def resolve_saved_set(args: argparse.Namespace) -> Path:
     tests = candidate if any(candidate.glob("test_*.py")) else candidate / "tests"
     if not tests.is_dir():
         raise Failure(
-            f"saved set not found: expected tests in {tests.relative_to(ROOT)}; "
+            f"saved set not found: expected tests in {display_path(tests)}; "
             f"commit one under benchmark/pytest-runner/saved-sets/"
         )
     return tests
@@ -311,11 +328,11 @@ def main(argv: list[str] | None = None) -> int:
                              f"default: {DEFAULT_SNAPSHOT.relative_to(ROOT)}")
     parser.add_argument("--report-root", default=".verify-runs", metavar="DIR",
                         help="directory for per-run reports (default: .verify-runs)")
-    parser.add_argument("--readiness-timeout", type=float, default=120,
+    parser.add_argument("--readiness-timeout", type=positive_seconds, default=120,
                         help="seconds to wait for the stand (default: 120)")
-    parser.add_argument("--runner-timeout", type=float, default=60,
+    parser.add_argument("--runner-timeout", type=positive_seconds, default=60,
                         help="runner per-suite timeout in seconds (default: 60)")
-    parser.add_argument("--pytest-timeout", type=float, default=1800,
+    parser.add_argument("--pytest-timeout", type=positive_seconds, default=1800,
                         help="hard timeout for the pytest step (default: 1800)")
     parser.add_argument("--pytest-extra", action="append", default=[],
                         help="extra argument for the pytest step (repeatable)")
@@ -324,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
 
     verify = Verify(args)
     mode = "offline" if args.offline else "full"
-    print(f"verify ({mode})  run {verify.run_id}  report {verify.report_dir.relative_to(ROOT)}")
+    print(f"verify ({mode})  run {verify.run_id}  report {display_path(verify.report_dir)}")
 
     owns_stand = False
 
@@ -375,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
         "mode": mode,
         "result": result,
         "llm": "not used",
-        "report": str((Path(summary["report_dir"]) / "summary.json").relative_to(ROOT)),
+        "report": display_path(Path(summary["report_dir"]) / "summary.json"),
     }, indent=2, ensure_ascii=False))
     return 0 if verify.ok else 1
 

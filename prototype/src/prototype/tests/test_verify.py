@@ -50,6 +50,54 @@ def test_prepared_environment_does_not_require_uv_on_path(verify, monkeypatch):
     assert "ok" in verify.env_check_common()
 
 
+def test_reports_can_be_saved_outside_repository(verify, monkeypatch, tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    monkeypatch.setattr(verify, "ROOT", root)
+    monkeypatch.setattr(verify, "DEFAULT_SNAPSHOT", root / "saved")
+    subprocess_double(monkeypatch, verify)
+    reports = tmp_path / "external-reports"
+    assert verify.main(["--offline", "--skip-runner-set", "--report-root", str(reports)]) == 0
+    summary = next(reports.rglob("summary.json"))
+    assert json.loads(summary.read_text(encoding="utf-8"))["result"] == "ok"
+    output = capsys.readouterr().out
+    payload = json.loads(output[output.rfind("\n{") + 1:])
+    assert payload["report"] == str(summary)
+
+
+def test_missing_external_saved_set_has_readable_error(verify, tmp_path):
+    missing = tmp_path.parent / "missing-external-suite"
+    with pytest.raises(verify.Failure, match="saved set not found"):
+        verify.resolve_saved_set(argparse.Namespace(saved_set=str(missing)))
+
+
+@pytest.mark.parametrize("flag", ["--readiness-timeout", "--runner-timeout", "--pytest-timeout"])
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf"])
+def test_invalid_timeout_is_rejected_before_running_commands(verify, monkeypatch, flag, value):
+    calls = subprocess_double(monkeypatch, verify)
+    with pytest.raises(SystemExit) as exc:
+        verify.main(["--offline", "--skip-runner-set", f"{flag}={value}"])
+    assert exc.value.code == 2
+    assert calls == []
+    assert not (verify.ROOT / ".verify-runs").exists()
+
+
+@pytest.mark.parametrize("offline,expected", [(True, "0"), (False, "1")])
+def test_pytest_integration_flags_are_explicit(verify, monkeypatch, tmp_path, offline, expected):
+    for flag in ("RUN_RUNNER_DOCKER_TESTS", "RUN_RUNNER_CATALOGUE_TESTS"):
+        monkeypatch.setenv(flag, "1" if offline else "0")
+    commands = []
+
+    def execute(cmd, **kwargs):
+        commands.append(kwargs["env"])
+        return subprocess.CompletedProcess(cmd, 0, "1 passed", "")
+
+    monkeypatch.setattr(verify.subprocess, "run", execute)
+    verify.run_pytest(argparse.Namespace(offline=offline, pytest_extra=[], pytest_timeout=30), tmp_path)
+    assert commands[0]["RUN_RUNNER_DOCKER_TESTS"] == expected
+    assert commands[0]["RUN_RUNNER_CATALOGUE_TESTS"] == expected
+
+
 @pytest.mark.parametrize("failure", ["preflight", "up", "readiness"])
 def test_failed_prerequisite_skips_dependent_commands(verify, monkeypatch, failure):
     calls = subprocess_double(monkeypatch, verify, failure=failure)

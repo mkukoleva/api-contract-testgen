@@ -6,15 +6,16 @@
 Параметры подключения:
 - API-ключ;
 - адрес API;
-- имя модели
+- имя модели;
+- таймаут запроса и число повторов
 
-загружаются из файла prototype/.env.
+читаются из переменных окружения; prototype/.env дополняет отсутствующие значения.
 
-Также здесь очищаются устаревшие SSL-настройки окружения,
-которые могут мешать подключению к Deepcode API.
+Существующие SSL-настройки окружения при build_model не изменяются.
 """
 
 import os
+import math
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -75,12 +76,8 @@ def build_model() -> ChatOpenAI:
 
     Raises:
         RuntimeError:
-            Если в .env отсутствует API-ключ,
-            адрес API или имя модели.
+            Если отсутствуют обязательные настройки либо неверны лимиты запроса.
     """
-
-    # Перед созданием HTTP-клиента очищаем старую SSL-настройку.
-    # _clear_unused_ssl_settings()
 
     api_key = os.getenv("DEEPCODE_API_KEY")
     base_url = os.getenv("DEEPCODE_BASE_URL")
@@ -101,6 +98,19 @@ def build_model() -> ChatOpenAI:
             "DEEPCODE_MODEL не указан в prototype/.env"
         )
 
+    try:
+        timeout = float(os.getenv("DEEPCODE_TIMEOUT_SECONDS", "60"))
+    except ValueError as exc:
+        raise RuntimeError("DEEPCODE_TIMEOUT_SECONDS должен быть конечным числом больше нуля.") from exc
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise RuntimeError("DEEPCODE_TIMEOUT_SECONDS должен быть конечным числом больше нуля.")
+    try:
+        max_retries = int(os.getenv("DEEPCODE_MAX_RETRIES", "1"))
+    except ValueError as exc:
+        raise RuntimeError("DEEPCODE_MAX_RETRIES должен быть целым числом не меньше нуля.") from exc
+    if max_retries < 0:
+        raise RuntimeError("DEEPCODE_MAX_RETRIES должен быть целым числом не меньше нуля.")
+
     print(f"[LLM] Используется модель: {model_name}")
     print(f"[LLM] API: {base_url}")
 
@@ -114,9 +124,9 @@ def build_model() -> ChatOpenAI:
         temperature=0,
 
         # Ограничиваем максимальное ожидание ответа модели.
-        timeout=60,
+        timeout=timeout,
 
         # При временной сетевой ошибке разрешаем
-        # одну автоматическую повторную попытку.
-        max_retries=1,
+        # заданное число повторов (по умолчанию один).
+        max_retries=max_retries,
     )

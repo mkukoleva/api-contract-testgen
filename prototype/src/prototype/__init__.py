@@ -24,8 +24,9 @@
 import argparse
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 
 SYSTEM_PROMPT = """
@@ -141,7 +142,7 @@ def _append_metrics_to_report(
         file.write(metrics_markdown)
 
 
-def run(contract_path: str) -> None:
+def run(contract_path: str, *, report_dir: Path | str | None = None) -> None:
     """
     Запустить полный цикл работы агента для одного API-контракта.
     """
@@ -209,20 +210,20 @@ def run(contract_path: str) -> None:
     print("=" * 60)
     print(final_message)
 
-    REPORTS_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    now = datetime.now(timezone.utc)
+    # Keep Markdown and metrics together without changing the metrics API.
+    # UUID separates concurrent runs even when their timestamps are identical.
+    report_root = Path(report_dir) if report_dir is not None else REPORTS_DIR
+    run_dir = report_root / f"{now.strftime('%Y-%m-%d_%H%M%S')}_{uuid4().hex}"
+    run_dir.mkdir(parents=True, exist_ok=False)
 
-    now = datetime.now()
-
-    report_path = REPORTS_DIR / (
+    report_path = run_dir / (
         f"report_{now.strftime('%Y-%m-%d_%H%M%S')}.md"
     )
 
     report_content = (
         f"# Отчёт агента тестирования API\n\n"
-        f"- Дата: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"- Дата: {now.isoformat()}\n"
         f"- Контракт: {contract_path}\n\n"
         f"---\n\n"
         f"{final_message}\n"
@@ -249,7 +250,7 @@ def run(contract_path: str) -> None:
 
     metrics_json_path = save_metrics_report(
         metrics,
-        REPORTS_DIR,
+        run_dir,
     )
 
     metrics_markdown = format_metrics_markdown(metrics)
@@ -297,10 +298,22 @@ def main() -> None:
         "contract",
         help="Путь к OpenAPI/Swagger-контракту.",
     )
+    parser.add_argument(
+        "--report-dir", type=Path, default=None,
+        help="Каталог отчётов и метрик; поддерживается путь вне проекта.",
+    )
 
     args = parser.parse_args()
 
-    run(args.contract)
+    from .parser.contract import ContractInputError
+
+    try:
+        if args.report_dir is None:
+            run(args.contract)
+        else:
+            run(args.contract, report_dir=args.report_dir)
+    except (ContractInputError, OSError, UnicodeError) as exc:
+        parser.error(str(exc))
 
 
 if __name__ == "__main__":

@@ -21,21 +21,28 @@
 |9|**Runnability**|Доля тестов без ручной правки|**Критический**|Запуск в изолированном окружении (Docker)|
 |10|**Generation Cost**|Токены / время / $ на генерацию|Высокий|Обёртка над LLM API (tiktoken)|
 
-> Подробное описание каждой метрики и формулы расчета находятся в [docs/report_metrics.md](../docs/report_metrics.md).
+> Методика и формулы находятся в [описании метрик](../docs/reports/mixed/report_metrics.md).
 
 ## Автоматический сбор метрик
 
-Для сбора метрик из отчётов инструментов используется скрипт:
+Общего скрипта `benchmark/collect_metrics.py` и отдельного `benchmark/README.md`
+в текущем проекте нет. Унифицированный сбор результатов baseline ещё требуется.
+Существующие модули:
 
-```bash
-python benchmark/collect_metrics.py --tool schemathesis --report report.ndjson
-```
+- [Метрики агентного цикла](../prototype/src/prototype/evaluate/metrics.py).
+- [Runnability pytest-конвейера](../prototype/src/prototype/evaluate/runnability.py).
+- [Мутационная оценка](../prototype/src/prototype/evaluate/mutation.py) и
+  [описание эксперимента Catalogue](../docs/reports/mixed/report_mutation_testing.md).
 
-Подробнее см. [benchmark/README.md](README.md).
+Эти модули не заменяют воспроизводимого сравнения с двумя baseline-инструментами.
 
 ## Предварительные результаты (Baseline)
 
-Ниже представлены предварительные результаты замеров для существующих решений на тестовом микросервисе `catalogue` (Sock Shop).
+Ниже сохранена предварительная исследовательская таблица для `catalogue`
+(Sock Shop). Числа этой таблицы не перепроверены текущим полным прогоном проекта;
+он проверяет pytest-runner, а не Microcks/EvoMaster. Без исходных результатов
+и одинаковых условий запуска таблица не подтверждает выполнение п. 2.1.8.
+Обзор инструментов: [исследовательский материал](../docs/reports/mixed/Schemathesis_Microcks_EvoMaster_RESTler_Pact.md).
 
 |Метрика|Schemathesis|Microcks|EvoMaster|APITestGenie (LLM)|
 |---|---|---|---|---|
@@ -52,7 +59,8 @@ python benchmark/collect_metrics.py --tool schemathesis --report report.ndjson
 
 ## Структура результатов
 
-Все сырые данные и сводные таблицы находятся в папке `benchmark/results/`:
+Каталог `benchmark/results/` сейчас отсутствует. Ниже предложена структура
+для будущих воспроизводимых сравнений; это не перечень уже полученных файлов:
 
 ```
 benchmark/results/
@@ -64,3 +72,8 @@ benchmark/results/
 │   └── evomaster_YYYYMMDD.json
 └── summary.json
 ```
+
+Готовый контрольный набор находится в
+[снимке Catalogue](pytest-runner/saved-sets/catalogue-2026-10-05/README.md).
+Он содержит ручные исправления и подходит для проверки инфраструктуры,
+но не доказывает генерацию без ручной правки или превосходство над baseline.
