@@ -24,6 +24,7 @@
 """
 
 import argparse
+import hashlib
 import json
 import time
 from datetime import datetime, timezone
@@ -72,6 +73,19 @@ SYSTEM_PROMPT = """
 
 
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
+PYTEST_SYSTEM_PROMPT = (
+    "Ты — ядро агента запуска настроенного конвейера pytest. "
+    "Вызови generate_tests_tool ровно один раз с пустыми аргументами. "
+    "Прочитай фактический результат инструмента и сообщи статус, "
+    "результаты pytest и пути отчётов. Не выдумывай успех при ошибке. "
+    "Адрес, сеть, лимиты и каталог задаёт доверенный оркестратор."
+)
+
+
+def _record_model(agent, model):
+    from .llm.model import describe_model
+    agent._prototype_model_metadata = describe_model(model)
+    return agent
 
 
 def build_agent(*, generation_settings=None):
@@ -93,19 +107,13 @@ def build_agent(*, generation_settings=None):
 
     if generation_settings is not None:
         from .service_tools.runner.tools import create_generation_tool
-        return create_agent(
+        return _record_model(create_agent(
             model=model,
             tools=[create_generation_tool(generation_settings, model=model)],
-            system_prompt=(
-                "Ты — ядро агента запуска настроенного конвейера pytest. "
-                "Вызови generate_tests_tool ровно один раз с пустыми аргументами. "
-                "Прочитай фактический результат инструмента и сообщи статус, "
-                "результаты pytest и пути отчётов. Не выдумывай успех при ошибке. "
-                "Адрес, сеть, лимиты и каталог задаёт доверенный оркестратор."
-            ),
-        )
+            system_prompt=PYTEST_SYSTEM_PROMPT,
+        ), model)
 
-    return create_agent(
+    return _record_model(create_agent(
         model=model,
         tools=[
             schemathesis_tool,
@@ -114,7 +122,7 @@ def build_agent(*, generation_settings=None):
             verify_user_story_tool,
         ],
         system_prompt=SYSTEM_PROMPT,
-    )
+    ), model)
 
 
 def _extract_final_message(result) -> str:
@@ -271,6 +279,20 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
     run_dir = report_root / f"{now.strftime('%Y-%m-%d_%H%M%S')}_{uuid4().hex}"
     run_dir.mkdir(parents=True, exist_ok=False)
 
+    from .llm.model import describe_model, runtime_versions
+    from .generator.prompts import prompt_versions
+    source = Path(contract_path)
+    provenance = {
+        "contract": {**contract, "sha256": hashlib.sha256(source.read_bytes()).hexdigest() if source.is_file() else None},
+        "llm": getattr(agent, "_prototype_model_metadata", describe_model(None)),
+        "prompts": {**prompt_versions(), "agent_sha256": hashlib.sha256(
+            (PYTEST_SYSTEM_PROMPT if generation_settings is not None else SYSTEM_PROMPT).encode("utf-8")).hexdigest()},
+        "runtime": runtime_versions(),
+        "generation_reports": [data.get("report_paths") for data in generation_results],
+    }
+    metadata_path = run_dir / "run-metadata.json"
+    metadata_path.write_text(json.dumps(provenance, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+
     report_path = run_dir / (
         f"report_{now.strftime('%Y-%m-%d_%H%M%S')}.md"
     )
@@ -279,6 +301,7 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
         f"# Отчёт агента тестирования API\n\n"
         f"- Дата: {now.isoformat()}\n"
         f"- Контракт: {contract_path}\n\n"
+        f"- Метаданные прогона: {metadata_path}\n\n"
         f"---\n\n"
         f"{final_message}\n"
     )

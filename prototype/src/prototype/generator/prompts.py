@@ -6,6 +6,8 @@ pass by loosening the expectation is never an acceptable repair (ADR 0004).
 """
 
 from pydantic import BaseModel, Field
+import hashlib
+import inspect
 
 
 GENERATION_SYSTEM_PROMPT = """\
@@ -162,3 +164,12 @@ def diag_tail(message: str | None, max_chars: int) -> str:
     if len(message) <= max_chars:
         return message
     return "…(обрезано начало)\n" + message[-max_chars:]
+
+
+def prompt_versions() -> dict[str, str]:
+    """Fingerprint the system prompt and builder template, without test/contract data."""
+    return {f"{name}_sha256": hashlib.sha256(
+        (system + "\n" + inspect.getsource(builder)).encode("utf-8")).hexdigest()
+        for name, system, builder in (
+            ("generation", GENERATION_SYSTEM_PROMPT, build_generation_prompt),
+            ("repair", REPAIR_SYSTEM_PROMPT, build_repair_prompt))}

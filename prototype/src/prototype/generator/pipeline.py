@@ -35,6 +35,8 @@ from .context import load_contract
 from .contracts import GenerationRun, GenerationSettings, RepairAttempt
 from .generate import generate_suite
 from .repair import apply_repair, classify_result, repair_call
+from .prompts import prompt_versions
+from ..parser.contract import contract_provenance
 
 _TERMINAL_INFRA_STATUSES = (
     RunStatus.INFRASTRUCTURE_ERROR,
@@ -124,7 +126,7 @@ def run_generation_pipeline(
     ``run_tests_fn`` and ``save_fn`` default to the isolated Docker runner and
     prototype.storage; tests inject fakes for both.
     """
-    from ..service_tools.runner.docker_runner import run_tests as default_run_tests
+    from ..service_tools.runner.docker_runner import DEFAULT_IMAGE, run_tests as default_run_tests
     from ..storage import SaveRequest, save_test_suite as default_save
 
     # output_dir is a root, not a reusable attempt directory. Allocate even
@@ -137,16 +139,28 @@ def run_generation_pipeline(
         return GenerationRun("infrastructure_error", settings.contract_path, settings.model,
                              0, 0, 0, 0, generator_errors=(f"creating run directory failed: {exc}",))
     settings = replace(settings, output_dir=run_dir)
+    from ..llm.model import describe_model, runtime_versions
+    provenance = {
+        "contract": {}, "llm": describe_model(model), "prompts": prompt_versions(),
+        "runtime": runtime_versions(),
+        "runner": {"image": DEFAULT_IMAGE, "base_url": settings.base_url, "network": settings.network,
+                   "blocked_networks": list(settings.blocked_networks),
+                   "timeout_seconds": settings.runner_timeout_seconds,
+                   "max_repair_attempts": settings.max_repair_attempts,
+                   "repair_token_budget": settings.repair_token_budget},
+    }
 
     def early_failure(message: str, status: str = "generation_error") -> GenerationRun:
         return _save_report(GenerationRun(
             status, settings.contract_path, settings.model, 0, 0, 0, 0,
-            generator_errors=(message,), runnability=compute_runnability((), None).to_dict()), settings)
+            generator_errors=(message,), runnability=compute_runnability((), None).to_dict(),
+            provenance=provenance), settings)
 
     # Validate input before constructing a provider client. An input failure
     # never reaches generation/runner and still has a per-run report.
     try:
         contract = load_contract(settings.contract_path)
+        provenance["contract"] = contract_provenance(contract, settings.contract_path)
     except (OSError, ValueError, UnicodeError) as exc:
         return early_failure(f"loading contract failed: {exc}")
 
@@ -160,6 +174,9 @@ def run_generation_pipeline(
         except (OSError, ValueError, RuntimeError) as exc:
             from ..llm.diagnostics import describe_error
             return early_failure(f"model initialization failed: {describe_error(exc)}")
+
+    provenance["llm"] = describe_model(model, fallback=settings.model)
+    settings = replace(settings, model=provenance["llm"]["model"])
 
     if run_tests_fn is None:
         # Service mode needs the runner network (and blocked networks) which
@@ -196,6 +213,7 @@ def run_generation_pipeline(
                 generator_errors=tuple(generator_errors),
                 test_cases=(),
                 runnability=compute_runnability((), None).to_dict(),
+                provenance=provenance,
             ),
             settings,
         )
@@ -219,7 +237,7 @@ def run_generation_pipeline(
                     contract_path=settings.contract_path,
                     files=generated_files,
                     model=settings.model,
-                    generator_meta={"attempt": index, **(extra or {})},
+                    generator_meta={"attempt": index, **(extra or {}), "provenance": provenance},
                     output_root=settings.output_root,
                     collect=False,
                 )
@@ -370,6 +388,7 @@ def run_generation_pipeline(
             run_result=run_result_dict,
             test_cases=expected,
             runnability=compute_runnability(expected, run_result_dict).to_dict(),
+            provenance=provenance,
         ),
         settings,
     )

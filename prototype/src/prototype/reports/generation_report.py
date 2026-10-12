@@ -116,6 +116,9 @@ def _markdown(payload: dict) -> str:
                 f"`{_text(version.get('tests_dir'))}` |"
             )
         lines.append("")
+    if payload.get("provenance"):
+        lines += ["## Происхождение прогона", "", _code(
+            json.dumps(payload["provenance"], ensure_ascii=False, indent=2)), ""]
     return "\n".join(lines) + "\n"
 
 
@@ -178,6 +181,7 @@ def save_generation_report(
         "environmental": list(run.environmental),
         "generator_errors": list(run.generator_errors),
         "saved_versions": list(run.saved_versions),
+        "provenance": run.provenance,
     }
     json_text = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     markdown = _markdown(payload)

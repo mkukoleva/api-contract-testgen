@@ -198,6 +198,8 @@ class GenerationRun:
     runnability: dict[str, Any] | None = None
     # Paths of the JSON/Markdown generation report if one was saved.
     report_paths: dict[str, str] | None = None
+    # Additive provenance; metrics and existing consumer fields are unchanged.
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -220,4 +222,5 @@ class GenerationRun:
             "test_cases": list(self.test_cases),
             "runnability": self.runnability,
             "report_paths": self.report_paths,
+            "provenance": self.provenance,
         }

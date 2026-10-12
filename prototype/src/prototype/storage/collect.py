@@ -1,7 +1,7 @@
 """Legacy host collection for explicitly trusted, controlled fixtures only.
 
 Collection imports every test module, so module-level code DOES execute. This is
-not a sandbox and not network isolation: that belongs to the runner (ТЗ 2.2.6,
+not a sandbox and not network isolation: that belongs to the runner (ТЗ v3 4.5.2.3,
 ADR 0002). Normal storage and tool flows skip this collector; generated code
 must be collected inside the isolated runner. Test bodies are never run here.
 """

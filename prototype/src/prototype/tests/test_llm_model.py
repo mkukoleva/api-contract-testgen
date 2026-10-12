@@ -59,3 +59,13 @@ def test_missing_credentials_still_fail_before_constructor(constructor, monkeypa
 def test_configuration_never_logs_api_key(constructor, capsys):
     model.build_model()
     assert "test-key" not in capsys.readouterr().out
+
+
+def test_metadata_reads_actual_sdk_parameters_without_serializing_credentials():
+    import json
+    from langchain_openai import ChatOpenAI
+    client = ChatOpenAI(model="configured-qwen", api_key="dummy-private-sdk-key",
+                        base_url="https://example.invalid/v1", temperature=0, timeout=17, max_retries=0)
+    data = model.describe_model(client)
+    assert data == {"model": "configured-qwen", "temperature": 0, "timeout_seconds": 17, "max_retries": 0}
+    assert "dummy-private-sdk-key" not in json.dumps(data)

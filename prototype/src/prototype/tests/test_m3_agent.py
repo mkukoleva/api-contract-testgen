@@ -19,6 +19,7 @@ from prototype.service_tools.runner.docker_runner import run_tests
 
 
 class ScriptedAgentModel(BaseChatModel):
+    model_name: str = "scripted-provider-model"
     calls: list[str] = Field(default_factory=list)
     tool_results: list[dict] = Field(default_factory=list)
     code: str = (
@@ -79,6 +80,9 @@ def test_core_agent_receives_real_m3_results_and_saved_suite_replays_without_mod
     report = json.loads(Path(data["report_paths"]["json"]).read_text(encoding="utf-8"))
     assert report["pytest"]["summary"] == data["summary"]
     assert report["runnability"] == data["runnability"]
+    assert report["provenance"]["llm"]["model"] == model.model_name
+    metadata = json.loads(next(settings.output_dir.rglob("run-metadata.json")).read_text(encoding="utf-8"))
+    assert metadata["llm"]["model"] == report["provenance"]["llm"]["model"]
     cli_report = next(settings.output_dir.rglob("report_*.md")).read_text(encoding="utf-8")
     assert "Статус: success" in cli_report
     saved = Path(data["saved_versions"][-1]["tests_dir"])

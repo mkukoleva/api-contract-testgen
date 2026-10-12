@@ -82,7 +82,11 @@ def generate_suite(
     )
 
     llm = model if model is not None else build_model()
-    contract_fragment = render_contract_for_generation(contract)
+    try:
+        contract_fragment = render_contract_for_generation(contract)
+    except ValueError as exc:
+        return {"prepared": (), "errors": (f"invalid generation context: {exc}",),
+                "tokens": (0, 0, 0), "calls": 0}
     user_prompt = build_generation_prompt(contract_fragment)
 
     try:

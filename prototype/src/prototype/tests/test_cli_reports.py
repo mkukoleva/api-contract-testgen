@@ -36,7 +36,8 @@ def test_cli_runs_at_same_time_keep_both_reports_and_metrics(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("content", [None, "paths: [", '{"openapi":"2.0"}',
-                                     '{"openapi":"3.0.3","paths":[]}'])
+                                     '{"openapi":"3.0.3","paths":[]}',
+                                     '{"openapi":"3.0.3"}', '{"openapi":"3.0.3","paths":{}}'])
 def test_cli_invalid_contract_exits_without_calling_agent(tmp_path, monkeypatch, capsys, content):
     path = tmp_path / "bad.yaml"
     if content is not None:
@@ -61,7 +62,7 @@ def test_cli_report_dir_keeps_results_outside_default_directory(tmp_path, monkey
     selected = tmp_path / "external reports"
     default = tmp_path / "default"
     path = tmp_path / "valid.yaml"
-    path.write_text("openapi: 3.0.3\ninfo: {}\npaths: {}", encoding="utf-8")
+    path.write_text("openapi: 3.0.3\ninfo: {}\npaths:\n  /items:\n    get:\n      responses:\n        '200':\n          description: OK", encoding="utf-8")
     monkeypatch.setattr("sys.argv", ["tester", str(path), "--report-dir", str(selected)])
     monkeypatch.setattr(prototype, "REPORTS_DIR", default)
     monkeypatch.setattr(prototype, "build_agent", lambda: SimpleNamespace(

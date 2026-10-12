@@ -55,6 +55,11 @@ def test_existing_agent_keeps_its_model_prompt_and_four_tools(monkeypatch):
     agents.create_agent = lambda **kwargs: SimpleNamespace(**kwargs)
     llm = ModuleType("prototype.llm.model")
     llm.build_model = lambda: model
+    metadata_sources = []
+    def describe_model(client):
+        metadata_sources.append(client)
+        return {"model": "mock-model"}
+    llm.describe_model = describe_model
     tools = ModuleType("prototype.service_tools.runner.tools")
     for name in tool_names:
         setattr(tools, name, object())
@@ -64,6 +69,8 @@ def test_existing_agent_keeps_its_model_prompt_and_four_tools(monkeypatch):
         monkeypatch.setitem(sys.modules, name, module)
 
     agent = prototype.build_agent()
+    assert metadata_sources == [model]
+    assert agent._prototype_model_metadata == {"model": "mock-model"}
     assert agent.model is model
     assert agent.system_prompt == prototype.SYSTEM_PROMPT
     assert agent.tools == [getattr(tools, name) for name in tool_names]

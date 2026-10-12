@@ -16,6 +16,8 @@
 
 import os
 import math
+import platform
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -33,6 +35,28 @@ while not (PROTOTYPE_DIR / "pyproject.toml").is_file():
 # load_dotenv добавляет переменные из файла .env
 # в окружение текущего Python-процесса.
 load_dotenv(PROTOTYPE_DIR / ".env")
+
+
+def describe_model(model, *, fallback: str | None = None) -> dict:
+    """Whitelist actual client parameters; never serialize credentials/config wholesale."""
+    name = getattr(model, "model_name", None) or getattr(model, "model", None)
+    if not isinstance(name, str):
+        name = fallback
+    def scalar(attribute):
+        value = getattr(model, attribute, None)
+        return value if isinstance(value, (str, int, float, bool)) else None
+    return {"model": name, "temperature": scalar("temperature"),
+            "timeout_seconds": scalar("request_timeout"), "max_retries": scalar("max_retries")}
+
+
+def runtime_versions() -> dict:
+    dependencies = {}
+    for name in ("langchain", "langchain-core", "langchain-openai", "openai", "pytest", "requests", "pyyaml"):
+        try:
+            dependencies[name] = version(name)
+        except PackageNotFoundError:
+            dependencies[name] = None
+    return {"python": platform.python_version(), "dependencies": dependencies}
 
 
 def _clear_unused_ssl_settings() -> None:
