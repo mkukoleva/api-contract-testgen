@@ -7,15 +7,12 @@
 - Contract Coverage
 - Mutation Score
 - Runnability
+- Tests without manual edits
 - LLM Calls
 - Input Tokens
 - Output Tokens
 - Total Tokens
 - Generation Cost
-
-Модуль не выполняет тесты и не обращается к LLM самостоятельно.
-Он получает уже готовый результат работы агента и рассчитывает
-метрики на его основе.
 """
 
 from __future__ import annotations
@@ -30,13 +27,11 @@ from typing import Any
 
 @dataclass
 class GenerationMetrics:
-    """Набор метрик одного запуска генератора."""
-
     test_suite_size: int | None = None
 
     generation_time_seconds: float | None = None
 
-    contract_operations_total: int | None = None
+    contract_operations_total: int | None = None2.1.7
     contract_operations_covered: int | None = None
     contract_coverage_percent: float | None = None
 
@@ -45,6 +40,9 @@ class GenerationMetrics:
     runnable_tests: int | None = None
     total_generated_tests: int | None = None
     runnability_percent: float | None = None
+
+    tests_without_manual_edits: int | None = None
+    tests_without_manual_edits_percent: float | None = None
 
     llm_calls: int = 0
 
@@ -56,21 +54,10 @@ class GenerationMetrics:
     currency: str = "USD"
 
     def to_dict(self) -> dict[str, Any]:
-        """Преобразовать метрики в JSON-совместимый словарь."""
         return asdict(self)
 
 
 def _extract_content(message: Any) -> Any:
-    """
-    Получить content из LangChain-сообщения.
-
-    Content может быть:
-    - строкой;
-    - словарём;
-    - списком блоков;
-    - другим JSON-совместимым объектом.
-    """
-
     content = getattr(message, "content", message)
 
     if isinstance(content, str):
@@ -82,19 +69,15 @@ def _extract_content(message: Any) -> Any:
     return content
 
 
-def _extract_tool_results(result: dict[str, Any]) -> list[dict[str, Any]]:
-    """
-    Извлечь результаты вызовов tools из результата LangChain agent.invoke().
-    """
-
+def _extract_tool_results(
+    result: dict[str, Any],
+) -> list[dict[str, Any]]:
     messages = result.get("messages", [])
 
     tool_results: list[dict[str, Any]] = []
 
     for message in messages:
-        message_type = message.__class__.__name__
-
-        if message_type != "ToolMessage":
+        if message.__class__.__name__ != "ToolMessage":
             continue
 
         content = _extract_content(message)
@@ -111,12 +94,6 @@ def _extract_tool_results(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _count_llm_calls(result: dict[str, Any]) -> int:
-    """
-    Посчитать количество ответов языковой модели.
-
-    В LangChain каждый AIMessage соответствует одному ответу модели.
-    """
-
     messages = result.get("messages", [])
 
     return sum(
@@ -126,15 +103,9 @@ def _count_llm_calls(result: dict[str, Any]) -> int:
     )
 
 
-def _extract_token_usage(result: dict[str, Any]) -> tuple[int | None, int | None, int | None]:
-    """
-    Собрать статистику токенов из usage_metadata AIMessage.
-
-    Поддерживаются стандартные поля LangChain:
-    input_tokens
-    output_tokens
-    total_tokens
-    """
+def _extract_token_usage(
+    result: dict[str, Any],
+) -> tuple[int | None, int | None, int | None]:
 
     messages = result.get("messages", [])
 
@@ -155,15 +126,22 @@ def _extract_token_usage(result: dict[str, Any]) -> tuple[int | None, int | None
 
         found_usage = True
 
-        in_tokens = int(usage.get("input_tokens", 0) or 0)
-        out_tokens = int(usage.get("output_tokens", 0) or 0)
-        tot_tokens = usage.get("total_tokens")
-        if tot_tokens is None:
-            tot_tokens = in_tokens + out_tokens
+        in_tokens = int(
+            usage.get("input_tokens", 0) or 0
+        )
+
+        out_tokens = int(
+            usage.get("output_tokens", 0) or 0
+        )
+
+        total = usage.get("total_tokens")
+
+        if total is None:
+            total = in_tokens + out_tokens
 
         input_tokens += in_tokens
         output_tokens += out_tokens
-        total_tokens += int(tot_tokens or 0)
+        total_tokens += int(total or 0)
 
     if not found_usage:
         return None, None, None
@@ -175,50 +153,173 @@ def _calculate_generation_cost(
     input_tokens: int | None,
     output_tokens: int | None,
 ) -> float | None:
-    """
-    Рассчитать стоимость обращений к LLM.
-
-    Стоимость задаётся через переменные окружения:
-
-    DEEPCODE_INPUT_COST_PER_1K
-    DEEPCODE_OUTPUT_COST_PER_1K
-
-    Например:
-
-    DEEPCODE_INPUT_COST_PER_1K=0.001
-    DEEPCODE_OUTPUT_COST_PER_1K=0.002
-
-    Если цены не заданы, стоимость возвращается как None.
-    Это важно: стоимость нельзя придумывать.
-    """
 
     if input_tokens is None or output_tokens is None:
         return None
 
-    input_price = os.getenv("DEEPCODE_INPUT_COST_PER_1K")
-    output_price = os.getenv("DEEPCODE_OUTPUT_COST_PER_1K")
+    input_price = os.getenv(
+        "DEEPCODE_INPUT_COST_PER_1K"
+    )
+
+    output_price = os.getenv(
+        "DEEPCODE_OUTPUT_COST_PER_1K"
+    )
 
     if input_price is None or output_price is None:
         return None
 
     try:
-        input_cost_per_1k = float(input_price)
-        output_cost_per_1k = float(output_price)
+        input_price = float(input_price)
+        output_price = float(output_price)
     except ValueError:
         return None
 
-    input_cost = input_tokens / 1000 * input_cost_per_1k
-    output_cost = output_tokens / 1000 * output_cost_per_1k
+    cost = (
+        input_tokens / 1000 * input_price
+        + output_tokens / 1000 * output_price
+    )
 
-    return round(input_cost + output_cost, 6)
+    return round(cost, 6)
+
+
+def _find_generation_result(
+    tool_results: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+
+    for result in tool_results:
+
+        if result.get("tool") == "generate_tests_tool":
+            return result
+
+        if "pipeline_status" in result:
+            return result
+
+        if "test_suite_size" in result:
+            return result
+
+        if "generated_tests" in result:
+            return result
+
+    return None
+
+
+def _extract_test_suite_size(
+    tool_results: list[dict[str, Any]],
+) -> int | None:
+
+    result = _find_generation_result(tool_results)
+
+    if result is None:
+        return None
+
+    possible_fields = (
+        "test_suite_size",
+        "generated_tests",
+        "tests_count",
+        "test_count",
+    )
+
+    for field in possible_fields:
+
+        value = result.get(field)
+
+        if isinstance(value, int):
+            return value
+
+        if isinstance(value, list):
+            return len(value)
+
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            pass
+
+    return None
+
+
+def _extract_runnability(
+    tool_results: list[dict[str, Any]],
+    test_suite_size: int | None,
+) -> tuple[int | None, float | None]:
+
+    result = _find_generation_result(tool_results)
+
+    if result is None:
+        return None, None
+
+    runnable = result.get("runnable_tests")
+
+    if runnable is None:
+        runnable = result.get("passed_tests")
+
+    total = result.get("total_generated_tests")
+
+    if total is None:
+        total = test_suite_size
+
+    try:
+        runnable = int(runnable) if runnable is not None else None
+    except (TypeError, ValueError):
+        runnable = None
+
+    try:
+        total = int(total) if total is not None else None
+    except (TypeError, ValueError):
+        total = test_suite_size
+
+    if runnable is None or total is None or total <= 0:
+        return None, None
+
+    runnable = max(0, min(runnable, total))
+
+    percent = runnable / total * 100
+
+    return runnable, round(percent, 2)
+
+
+def _extract_manual_edit_metric(
+    tool_results: list[dict[str, Any]],
+    test_suite_size: int | None,
+) -> tuple[int | None, float | None]:
+
+    result = _find_generation_result(tool_results)
+
+    if result is None:
+        return None, None
+
+    value = result.get("tests_without_manual_edits")
+
+    if value is None:
+        value = result.get("manual_edit_free_tests")
+
+    if value is None:
+        value = result.get("tests_without_edits")
+
+    if value is None:
+        return None, None
+
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None, None
+
+    if test_suite_size is None or test_suite_size <= 0:
+        return value, None
+
+    value = max(0, min(value, test_suite_size))
+
+    percent = value / test_suite_size * 100
+
+    return value, round(percent, 2)
 
 
 def _extract_schemathesis_result(
     tool_results: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Найти результат schemathesis_tool."""
 
     for result in tool_results:
+
         if result.get("tool") == "schemathesis_tool":
             return result
 
@@ -228,67 +329,31 @@ def _extract_schemathesis_result(
     return None
 
 
-def _extract_generated_test_count(
-    tool_results: list[dict[str, Any]],
-) -> int | None:
-    """
-    Определить размер тестового набора.
-
-    В текущей версии прототипа Schemathesis сообщает количество
-    сгенерированных сценариев через scenarios.total.
-
-    Если инструмент генерации тестов вернёт test_suite_size,
-    оно также будет поддержано.
-    """
-
-    for result in tool_results:
-        if "test_suite_size" in result:
-            try:
-                return int(result["test_suite_size"])
-            except (TypeError, ValueError):
-                pass
-
-        scenarios = result.get("scenarios")
-
-        if isinstance(scenarios, dict) and "total" in scenarios:
-            try:
-                return int(scenarios["total"])
-            except (TypeError, ValueError):
-                pass
-
-    return None
-
-
 def _calculate_contract_coverage(
     contract_operations: int | None,
     schemathesis_result: dict[str, Any] | None,
+    generation_result: dict[str, Any] | None,
 ) -> tuple[int | None, float | None]:
-    """
-    Рассчитать покрытие контракта на уровне HTTP-операций.
-
-    Формула:
-
-        covered_operations / total_operations * 100
-
-    Для текущей интеграции Schemathesis считает все операции контракта,
-    переданные движку. Поэтому при успешном запуске число покрытых
-    операций берётся из поля operations.
-
-    Если данных недостаточно, возвращается None.
-    """
 
     if contract_operations is None:
         return None, None
 
-    if schemathesis_result is None:
-        return None, None
+    covered = None
 
-    status = schemathesis_result.get("status")
+    if generation_result is not None:
 
-    if status != "success":
-        return None, None
+        covered = generation_result.get(
+            "contract_operations_covered"
+        )
 
-    covered = schemathesis_result.get("operations")
+        if covered is None:
+            covered = generation_result.get(
+                "covered_operations"
+            )
+
+    if covered is None and schemathesis_result is not None:
+
+        covered = schemathesis_result.get("operations")
 
     if covered is None:
         return None, None
@@ -301,9 +366,14 @@ def _calculate_contract_coverage(
     if contract_operations <= 0:
         return None, None
 
-    covered = min(covered, contract_operations)
+    covered = min(
+        max(covered, 0),
+        contract_operations,
+    )
 
-    coverage = covered / contract_operations * 100
+    coverage = (
+        covered / contract_operations * 100
+    )
 
     return covered, round(coverage, 2)
 
@@ -315,49 +385,63 @@ def calculate_metrics(
     generation_time_seconds: float,
     mutation_score_percent: float | None = None,
 ) -> GenerationMetrics:
-    """
-    Рассчитать все доступные метрики по одному запуску.
 
-    Args:
-        agent_result:
-            Результат agent.invoke(...).
-
-        contract_summary:
-            Краткое описание OpenAPI-контракта.
-
-        generation_time_seconds:
-            Время работы agent.invoke().
-
-        mutation_score_percent:
-            Опциональный Mutation Score в процентах (задача 2.2.9).
-
-    Returns:
-        GenerationMetrics.
-    """
-
-    tool_results = _extract_tool_results(agent_result)
-
-    schemathesis_result = _extract_schemathesis_result(tool_results)
-
-    total_operations = contract_summary.get("operation_count")
-
-    if total_operations is not None:
-        try:
-            total_operations = int(total_operations)
-        except (TypeError, ValueError):
-            total_operations = None
-
-    covered_operations, contract_coverage = _calculate_contract_coverage(
-        total_operations,
-        schemathesis_result,
+    tool_results = _extract_tool_results(
+        agent_result
     )
 
-    test_suite_size = _extract_generated_test_count(tool_results)
+    schemathesis_result = _extract_schemathesis_result(
+        tool_results
+    )
 
-    llm_calls = _count_llm_calls(agent_result)
+    generation_result = _find_generation_result(
+        tool_results
+    )
 
-    input_tokens, output_tokens, total_tokens = _extract_token_usage(
+    total_operations = contract_summary.get(
+        "operation_count"
+    )
+
+    try:
+        total_operations = (
+            int(total_operations)
+            if total_operations is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        total_operations = None
+
+    test_suite_size = _extract_test_suite_size(
+        tool_results
+    )
+
+    covered_operations, coverage = (
+        _calculate_contract_coverage(
+            total_operations,
+            schemathesis_result,
+            generation_result,
+        )
+    )
+
+    runnable_tests, runnability = _extract_runnability(
+        tool_results,
+        test_suite_size,
+    )
+
+    (
+        tests_without_edits,
+        tests_without_edits_percent,
+    ) = _extract_manual_edit_metric(
+        tool_results,
+        test_suite_size,
+    )
+
+    llm_calls = _count_llm_calls(
         agent_result
+    )
+
+    input_tokens, output_tokens, total_tokens = (
+        _extract_token_usage(agent_result)
     )
 
     generation_cost = _calculate_generation_cost(
@@ -365,20 +449,15 @@ def calculate_metrics(
         output_tokens,
     )
 
-    # Mutation Score (задача 2.2.9):
-    # берётся из переданного значения либо из agent_result, если доступно
-    if mutation_score_percent is not None:
-        mutation_score = mutation_score_percent
-    else:
-        mutation_score = agent_result.get("mutation_score_percent")
+    mutation_score = mutation_score_percent
 
-    # Аналогично Runnability:
-    # полноценный pytest-runner пока не подключён к агенту.
-    runnability = None
-    runnable_tests = None
-    total_generated_tests = test_suite_size
+    if mutation_score is None:
+        mutation_score = agent_result.get(
+            "mutation_score_percent"
+        )
 
     return GenerationMetrics(
+
         test_suite_size=test_suite_size,
 
         generation_time_seconds=round(
@@ -387,22 +466,35 @@ def calculate_metrics(
         ),
 
         contract_operations_total=total_operations,
+
         contract_operations_covered=covered_operations,
-        contract_coverage_percent=contract_coverage,
+
+        contract_coverage_percent=coverage,
 
         mutation_score_percent=mutation_score,
 
         runnable_tests=runnable_tests,
-        total_generated_tests=total_generated_tests,
+
+        total_generated_tests=test_suite_size,
+
         runnability_percent=runnability,
+
+        tests_without_manual_edits=tests_without_edits,
+
+        tests_without_manual_edits_percent=(
+            tests_without_edits_percent
+        ),
 
         llm_calls=llm_calls,
 
         input_tokens=input_tokens,
+
         output_tokens=output_tokens,
+
         total_tokens=total_tokens,
 
         generation_cost=generation_cost,
+
         currency="USD",
     )
 
@@ -411,14 +503,11 @@ def save_metrics_report(
     metrics: GenerationMetrics,
     output_dir: Path,
 ) -> Path:
-    """
-    Сохранить метрики в JSON-файл.
 
-    Returns:
-        Путь к созданному JSON-файлу.
-    """
-
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     now = datetime.now()
 
@@ -427,7 +516,9 @@ def save_metrics_report(
     )
 
     payload = {
-        "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "generated_at": now.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
         "metrics": metrics.to_dict(),
     }
 
@@ -443,16 +534,19 @@ def save_metrics_report(
     return report_path
 
 
-def format_metrics_markdown(metrics: GenerationMetrics) -> str:
-    """
-    Сформировать читаемый Markdown-блок с метриками.
-    """
+def format_metrics_markdown(
+    metrics: GenerationMetrics,
+) -> str:
 
-    def value(value: Any, suffix: str = "") -> str:
-        if value is None:
+    def value(
+        item: Any,
+        suffix: str = "",
+    ) -> str:
+
+        if item is None:
             return "N/A"
 
-        return f"{value}{suffix}"
+        return f"{item}{suffix}"
 
     lines = [
         "## Метрики качества генерации",
@@ -476,42 +570,28 @@ def format_metrics_markdown(metrics: GenerationMetrics) -> str:
             "| Runnability | "
             f"{value(metrics.runnability_percent, ' %')} |"
         ),
+        (
+            "| Tests without manual edits | "
+            f"{value(metrics.tests_without_manual_edits_percent, ' %')} |"
+        ),
         f"| LLM Calls | {metrics.llm_calls} |",
-        f"| Input Tokens | {value(metrics.input_tokens)} |",
-        f"| Output Tokens | {value(metrics.output_tokens)} |",
-        f"| Total Tokens | {value(metrics.total_tokens)} |",
+        (
+            "| Input Tokens | "
+            f"{value(metrics.input_tokens)} |"
+        ),
+        (
+            "| Output Tokens | "
+            f"{value(metrics.output_tokens)} |"
+        ),
+        (
+            "| Total Tokens | "
+            f"{value(metrics.total_tokens)} |"
+        ),
         (
             "| Generation Cost | "
             f"{value(metrics.generation_cost, ' ' + metrics.currency)} |"
         ),
         "",
     ]
-
-    if metrics.mutation_score_percent is None:
-        lines.extend(
-            [
-                "> Mutation Score: N/A — "
-                "mutation testing runner ещё не подключён.",
-                "",
-            ]
-        )
-
-    if metrics.runnability_percent is None:
-        lines.extend(
-            [
-                "> Runnability: N/A — "
-                "pytest-runner ещё не подключён к циклу генерации.",
-                "",
-            ]
-        )
-
-    if metrics.generation_cost is None:
-        lines.extend(
-            [
-                "> Generation Cost: N/A — "
-                "цены токенов не заданы через DEEPCODE_*_COST_PER_1K.",
-                "",
-            ]
-        )
 
     return "\n".join(lines)
