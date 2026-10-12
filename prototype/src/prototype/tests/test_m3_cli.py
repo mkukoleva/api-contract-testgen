@@ -51,13 +51,13 @@ def test_generation_failure_has_a_nonzero_cli_exit(monkeypatch):
 def test_agent_run_cannot_claim_success_without_tool_result(tmp_path, monkeypatch, result, expected):
     import json
     from prototype.generator.contracts import GenerationSettings
-    from prototype.parser import contract
     messages = []
     if result is not None:
         class ToolMessage:
             content = json.dumps({"tool": "generate_tests_tool", **result})
         messages.append(ToolMessage())
-    monkeypatch.setattr(contract, "read_contract_summary", lambda _: {"operation_count": 1})
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "unused").write_text("openapi: 3.0.3\npaths:\n  /items:\n    get: {}", encoding="utf-8")
     monkeypatch.setattr(prototype, "build_agent", lambda **kw: SimpleNamespace(stream=lambda *a, **k: iter([{"messages": messages}]),
                                                                              invoke=lambda _: {"messages": messages}))
     config = GenerationSettings(contract_path="unused", output_dir=tmp_path)
@@ -66,13 +66,13 @@ def test_agent_run_cannot_claim_success_without_tool_result(tmp_path, monkeypatc
 
 def test_agent_failure_after_tool_keeps_m3_result_and_returns_failure(tmp_path, monkeypatch):
     from prototype.generator.contracts import GenerationSettings
-    from prototype.parser import contract
     class ToolMessage:
         content = '{"tool":"generate_tests_tool","pipeline_status":"success"}'
     def stream(*args, **kwargs):
         yield {"messages": [ToolMessage()]}
         raise RuntimeError("agent summary failed")
-    monkeypatch.setattr(contract, "read_contract_summary", lambda _: {"operation_count": 1})
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "unused").write_text("openapi: 3.0.3\npaths:\n  /items:\n    get: {}", encoding="utf-8")
     monkeypatch.setattr(prototype, "build_agent", lambda **kw: SimpleNamespace(stream=stream))
     assert prototype.run("unused", report_dir=tmp_path,
         generation_settings=GenerationSettings(contract_path="unused")) == 1
@@ -82,9 +82,9 @@ def test_agent_failure_after_tool_keeps_m3_result_and_returns_failure(tmp_path, 
 
 def test_agent_initialization_failure_has_report_without_leaking_key(tmp_path, monkeypatch):
     from prototype.generator.contracts import GenerationSettings
-    from prototype.parser import contract
     monkeypatch.setenv("DEEPCODE_API_KEY", "dummy-private-key")
-    monkeypatch.setattr(contract, "read_contract_summary", lambda _: {"operation_count": 1})
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "unused").write_text("openapi: 3.0.3\npaths:\n  /items:\n    get: {}", encoding="utf-8")
     def fail(**kwargs):
         raise RuntimeError("provider rejected dummy-private-key")
     monkeypatch.setattr(prototype, "build_agent", fail)

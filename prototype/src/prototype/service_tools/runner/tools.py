@@ -552,7 +552,33 @@ def _generation_result(run) -> dict[str, Any]:
         "saved_versions": list(run.saved_versions),
         "generator_errors": list(run.generator_errors),
         "report_paths": run.report_paths,
+        "recommendations": run.recommendations,
     }
+
+
+def _compact_generation_result(full):
+    from ..selection import _clip
+    compact = dict(full)
+    fields = ("runnability", "repair_log", "suspected_defects", "environmental", "saved_versions",
+              "generator_errors", "recommendations")
+    changed = []
+    for field in fields:
+        if field not in full:
+            continue
+        compact[field] = _clip(full[field])
+        if compact[field] != full[field]:
+            changed.append(field)
+    if len(json.dumps(compact, ensure_ascii=False)) > 5600:
+        for field in ("suspected_defects", "environmental", "repair_log", "generator_errors", "recommendations"):
+            if compact.get(field):
+                compact[field] = {} if field == "recommendations" else []
+                if field not in changed:
+                    changed.append(field)
+            if len(json.dumps(compact, ensure_ascii=False)) <= 5600:
+                break
+    compact["truncated_fields"] = changed
+    compact["details_in_report"] = True
+    return compact
 
 
 def create_generation_tool(settings, *, model=None):
@@ -582,14 +608,19 @@ def create_generation_tool(settings, *, model=None):
                 raise ValueError("This tool accepts no configuration arguments")
             return (), {}
 
-    def generate_bound_tests() -> dict[str, Any]:
+    def generate_bound_tests():
         """Generate and execute pytest tests using the configured isolated environment."""
         try:
             run = run_generation_pipeline(settings) if model is None else run_generation_pipeline(settings, model=model)
-            return _generation_result(run)
+            full = _generation_result(run)
+            # Artifact is retained by trusted consumers but never sent to the
+            # chat model. Metrics/report data therefore remain complete.
+            return _compact_generation_result(full), full
         except (OSError, ValueError, RuntimeError) as exc:
             from ...llm.diagnostics import describe_error
-            return {"tool": "generate_tests_tool", "status": "error",
+            full = {"tool": "generate_tests_tool", "status": "error",
                     "message": f"Не удалось запустить конвейер генерации: {describe_error(exc)}"}
+            return full, full
 
-    return BoundTool.from_function(generate_bound_tests, name="generate_tests_tool", args_schema=TrustedInput)
+    return BoundTool.from_function(generate_bound_tests, name="generate_tests_tool", args_schema=TrustedInput,
+                                   response_format="content_and_artifact")

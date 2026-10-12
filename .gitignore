@@ -18,3 +18,7 @@ prototype/.pipeline-runs/
 prototype/.repair-check-runs/
 prototype/.repair-probe/
 prototype/generated/
+.contract-runs/
+prototype/.contract-runs/
+.tool-runs/
+prototype/.tool-runs/

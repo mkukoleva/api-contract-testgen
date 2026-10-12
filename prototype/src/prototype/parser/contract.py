@@ -19,8 +19,14 @@ import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.error import HTTPError, URLError
+from http.client import HTTPException
+import socket
+import time
 
 import yaml
+from .contract_input import ContractDocument, ContractInputError, normalize_location
 
 
 # Только эти ключи внутри paths считаем HTTP-методами.
@@ -36,8 +42,64 @@ HTTP_METHODS = {
 }
 
 
-class ContractInputError(ValueError):
-    """A malformed or unsupported contract, before any LLM call."""
+MAX_CONTRACT_BYTES = 5 * 1024 * 1024
+CONTRACT_DOWNLOAD_TIMEOUT = 15.0
+
+
+class _ContractRedirects(HTTPRedirectHandler):
+    max_redirections = 5
+    max_repeats = 2
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        normalize_location(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def load_contract_document(location: Path | str) -> ContractDocument:
+    """Read a file or bounded HTTP(S) response once; never resolve remote $refs."""
+    location = normalize_location(location)
+    resolved_url = None
+    if isinstance(location, Path):
+        if location.stat().st_size > MAX_CONTRACT_BYTES:
+            raise ContractInputError("Контракт превышает лимит 5 MiB.")
+        with location.open("rb") as stream:
+            raw = stream.read(MAX_CONTRACT_BYTES + 1)
+    else:
+        opener = build_opener(ProxyHandler({}), _ContractRedirects())
+        deadline = time.monotonic() + CONTRACT_DOWNLOAD_TIMEOUT
+        try:
+            with opener.open(Request(location, headers={"Accept": "application/json, application/yaml, text/yaml"}),
+                             timeout=CONTRACT_DOWNLOAD_TIMEOUT) as response:
+                resolved_url = response.geturl()
+                length = response.headers.get("Content-Length")
+                if length and length.isdigit() and int(length) > MAX_CONTRACT_BYTES:
+                    raise ContractInputError("Контракт превышает лимит 5 MiB.")
+                chunks, size = [], 0
+                while size <= MAX_CONTRACT_BYTES:
+                    if time.monotonic() >= deadline:
+                        raise ContractInputError("Истёк лимит времени загрузки контракта.")
+                    chunk = response.read1(min(65536, MAX_CONTRACT_BYTES + 1 - size))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    size += len(chunk)
+                raw = b"".join(chunks)
+        except HTTPError as exc:
+            raise ContractInputError(f"Загрузка контракта: HTTP {exc.code}.") from exc
+        except (URLError, TimeoutError, socket.timeout, OSError, HTTPException) as exc:
+            # Do not include URLs, query secrets or exception headers in reports.
+            raise ContractInputError("Не удалось загрузить контракт по HTTP(S): соединение или таймаут.") from exc
+    if len(raw) > MAX_CONTRACT_BYTES:
+        raise ContractInputError("Контракт превышает лимит 5 MiB.")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeError as exc:
+        raise ContractInputError("Контракт должен быть в кодировке UTF-8.") from exc
+    try:
+        data = _parse_contract(text)
+    except RecursionError as exc:
+        raise ContractInputError("Слишком глубокая структура JSON/YAML контракта.") from exc
+    return ContractDocument(str(location), raw, data, resolved_url)
 
 
 def _validate_structure(data: dict[str, Any], *, require_operations: bool = True) -> None:
@@ -56,6 +118,9 @@ def _validate_structure(data: dict[str, Any], *, require_operations: bool = True
     for field in ("info", "paths"):
         if not isinstance(data.get(field, {}), dict):
             raise ContractInputError(f"Поле {field} должно быть объектом.")
+    for field in ("title", "version"):
+        if field in data.get("info", {}) and not isinstance(data["info"][field], str):
+            raise ContractInputError(f"Поле info.{field} должно быть строкой.")
     for route, path_item in data.get("paths", {}).items():
         if not isinstance(route, str):
             raise ContractInputError("Ключи paths должны быть строками.")
@@ -135,24 +200,12 @@ def normalize_contract(data: dict[str, Any]) -> dict[str, Any]:
     return expand(data)
 
 
-def _load_contract(path: Path) -> dict[str, Any]:
-    """
-    Загрузить контракт из JSON или YAML.
+def _load_contract(path: Path | str) -> dict[str, Any]:
+    return load_contract_document(path).data
 
-    Сначала пытаемся прочитать файл как JSON.
-    Если JSON-парсинг не удался, пытаемся прочитать его как YAML.
 
-    Args:
-        path: Путь к файлу контракта.
-
-    Returns:
-        Контракт как Python-словарь.
-
-    Raises:
-        ContractInputError: невалидный формат или структура контракта.
-    """
-
-    text = path.read_text(encoding="utf-8")
+def _parse_contract(text: str) -> dict[str, Any]:
+    """Parse JSON or safe YAML, validate consumed fields and expand local refs."""
 
     try:
         data = json.loads(text)
@@ -180,7 +233,7 @@ def read_contract_summary(contract_path: str) -> dict[str, Any]:
     Агенту передаётся только этот результат, а не весь OpenAPI-файл.
 
     Args:
-        contract_path: Путь к OpenAPI/Swagger-файлу.
+        contract_path: Путь или HTTP(S) URL OpenAPI/Swagger-контракта.
 
     Returns:
         Краткое структурированное описание контракта.
@@ -189,16 +242,8 @@ def read_contract_summary(contract_path: str) -> dict[str, Any]:
         FileNotFoundError: если файл не существует.
     """
 
-    path = Path(contract_path)
-
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Контракт не найден: {path}"
-        )
-
-    data = _load_contract(path)
-
-    return summarize_contract(data, str(path))
+    document = load_contract_document(contract_path)
+    return summarize_contract(document.data, document.source)
 
 
 def summarize_contract(data: dict[str, Any], source: str) -> dict[str, Any]:
@@ -249,3 +294,15 @@ def summarize_contract(data: dict[str, Any], source: str) -> dict[str, Any]:
 def contract_provenance(data: dict[str, Any], path: Path) -> dict[str, Any]:
     return {**summarize_contract(data, str(path)),
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def save_contract_snapshot(document: ContractDocument, directory: Path) -> dict[str, Any]:
+    """Keep the exact input for storage/replay; report the original source."""
+    directory.mkdir(parents=True, exist_ok=True)
+    snapshot = directory / "contract.yaml"
+    snapshot.write_bytes(document.raw)
+    result = {**summarize_contract(document.data, document.source),
+              "sha256": hashlib.sha256(document.raw).hexdigest(), "snapshot_path": str(snapshot.resolve())}
+    if document.resolved_url:
+        result["resolved_url"] = document.resolved_url
+    return result

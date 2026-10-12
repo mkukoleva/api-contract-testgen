@@ -119,6 +119,8 @@ def _markdown(payload: dict) -> str:
     if payload.get("provenance"):
         lines += ["## Происхождение прогона", "", _code(
             json.dumps(payload["provenance"], ensure_ascii=False, indent=2)), ""]
+    if payload.get("recommendations"):
+        lines += ["## Рекомендации", "", _code(json.dumps(payload["recommendations"], ensure_ascii=False, indent=2)), ""]
     return "\n".join(lines) + "\n"
 
 
@@ -165,6 +167,7 @@ def save_generation_report(
         "kind": "generation_run",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": run.status,
+        "recommendations": run.recommendations,
         "contract_path": str(run.contract_path),
         "model": run.model,
         "attempts": run.attempts,

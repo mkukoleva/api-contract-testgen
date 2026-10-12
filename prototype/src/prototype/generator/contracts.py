@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 from typing import Any, Literal
+from ..parser.contract_input import ContractDocument, normalize_location
 
 # The team plan caps repair rounds at three (report_metrics.md: "≤3 attempts").
 DEFAULT_MAX_REPAIR_ATTEMPTS = 3
@@ -49,7 +50,7 @@ def _env_positive_int(name: str, default: int) -> int:
     if not raw:
         return default
     try:
-        return _positive_int(int(raw), name)
+        return _non_negative_int(int(raw), name)
     except ValueError:
         return default
 
@@ -91,11 +92,16 @@ class GenerationSettings:
     test_fragment_lines: int = DEFAULT_TEST_FRAGMENT_LINES
     contract_fragment_chars: int = DEFAULT_CONTRACT_FRAGMENT_CHARS
     diagnostic_chars: int = DEFAULT_DIAGNOSTIC_CHARS
+    source_code_path: Path | str | None = None
+    input_document: ContractDocument | None = field(default=None, repr=False, compare=False)
+    source_context: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
-            self, "contract_path", _str_path(self.contract_path, "contract_path")
+            self, "contract_path", normalize_location(self.contract_path)
         )
+        if self.source_code_path is not None:
+            object.__setattr__(self, "source_code_path", _str_path(self.source_code_path, "source_code_path"))
         if self.model is not None and not isinstance(self.model, str):
             raise ValueError("model must be a string or None")
         if self.base_url is not None and not isinstance(self.base_url, str):
@@ -125,7 +131,7 @@ class GenerationSettings:
         object.__setattr__(
             self,
             "max_repair_attempts",
-            _positive_int(self.max_repair_attempts, "max_repair_attempts"),
+            _non_negative_int(self.max_repair_attempts, "max_repair_attempts"),
         )
         object.__setattr__(
             self,
@@ -178,7 +184,7 @@ class GenerationRun:
     """Structured result of one pipeline run (generation + self-repair)."""
 
     status: str
-    contract_path: Path
+    contract_path: Path | str
     model: str | None
     attempts: int
     input_tokens: int
@@ -200,6 +206,7 @@ class GenerationRun:
     report_paths: dict[str, str] | None = None
     # Additive provenance; metrics and existing consumer fields are unchanged.
     provenance: dict[str, Any] = field(default_factory=dict)
+    recommendations: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -223,4 +230,5 @@ class GenerationRun:
             "runnability": self.runnability,
             "report_paths": self.report_paths,
             "provenance": self.provenance,
+            "recommendations": self.recommendations,
         }

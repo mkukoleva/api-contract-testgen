@@ -48,6 +48,66 @@ py -3.12 -m uv run --locked tester src/prototype/tests/fixtures/demo_openapi.yam
 локальная ссылка `$ref` отклоняются до LLM. При подсчёте операций учитываются
 локальные ссылки на Path Item. Swagger 2.0 сохраняется как разрешённый формат.
 
+### Загрузка и управление контрактами — ТЗ v3, 4.1.1.1–4.1.1.4
+
+Вход — локальный JSON/YAML-файл или HTTP(S) URL, включая `/openapi.json`
+локального FastAPI. Расширение файла и HTTP Content-Type не определяют формат:
+проверяется содержимое. Поддерживаются OpenAPI 3.x и Swagger 2.0.
+HTTP-загрузка ограничена размером 5 MiB, таймаутом соединения/чтения 15 секунд
+и числом перенаправлений; URL с учётными данными и фрагментом отклоняется.
+Локальные файлы также ограничены 5 MiB. Внешние `$ref` автоматически не загружаются.
+
+Проверка без `.env`, LLM, Docker и генерации тестов (из `prototype/`):
+
+```powershell
+py -3.12 -m uv run --locked tester ../benchmark/catalogue/catalogue.swagger.json --inspect-contract --report-dir "$env:TEMP/api-contract-inputs"
+py -3.12 -m uv run --locked tester http://127.0.0.1:8000/openapi.json --inspect-contract --report-dir "$env:TEMP/api-contract-inputs"
+```
+
+Для второго примера FastAPI должен уже работать на порту 8000.
+Команда выводит название и версию API, спецификацию, число и список операций;
+сохраняет `contract-report.json` и `contract-report.md` в отдельный каталог.
+`inputs/contract.yaml` содержит точные входные байты (JSON также допустим
+в этом файле), SHA-256 и исходный путь/URL записываются в отчёт.
+Для URL отдельно сохраняется адрес после перенаправлений.
+
+`--source-code` принимает Python-файл или каталог сервиса. Например:
+
+```powershell
+py -3.12 -m uv run --locked tester http://127.0.0.1:8000/openapi.json --inspect-contract --source-code C:/path/to/fastapi-service --report-dir "$env:TEMP/api-contract-inputs"
+```
+
+Исходники разбираются через AST без импорта, исполнения и установки FastAPI.
+Извлекаются обработчики документированных операций, связанные функции и классы
+(включая модели Pydantic). Учитываются строковые пути, `APIRouter(prefix=...)`
+и литеральные `include_router(..., prefix=...)` внутри одного файла.
+Межмодульные/динамические маршруты не исполняются для разрешения: ограничения
+фиксируются в предупреждениях; при отсутствии совпадений используются сигнатуры.
+Читаются только `.py`, без `.venv`, `.git`, кэшей и вложенных символьных ссылок.
+Лимиты: 100 файлов, 256 KiB на файл, 6000 символов контекста; сокращения отмечаются.
+Неверный явно указанный путь отклоняется до обращения к модели.
+
+Для генерации добавьте `--source-code` к существующей команде `tester --generate`:
+
+```powershell
+py -3.12 -m uv run --locked tester http://127.0.0.1:8000/openapi.json --generate --source-code C:/path/to/fastapi-service --base-url http://service:8000 --network service_runner --report-dir "$env:TEMP/api-contract-runs" --tests-output-dir "$env:TEMP/api-contract-saved"
+```
+
+Адрес и сеть в примере нужно заменить настройками своего стенда; генерации
+нужны подготовленные runner-образ и LLM-переменные из следующего раздела.
+Без `--source-code` продолжает работать генерация только по контракту.
+Источник — дополнительный контекст для HTTP-тестов, контракт задаёт ожидаемые
+ответы. Генерация unit-тестов исходников относится к отдельному расширению ТЗ.
+
+Контракт скачивается один раз за запуск: CLI передаёт загруженный документ
+конвейеру, storage получает его локальный снимок, self-repair использует тот же
+разобранный контракт. В отчётах CLI/генерации и `generator.meta.provenance`
+сохраняются исходный путь/URL, название, версия API, спецификация, операции,
+SHA-256 и сведения об исходниках. `inputs/source-context.json` хранит выбранный
+контекст и предупреждения. Повторный запуск сохранённых pytest-файлов не требует
+скачивания контракта, исходников или обращения к LLM; сетевые права runner
+остаются ограничены тестируемым сервисом.
+
 ### env-шаблон
 ```
 DEEPCODE_API_KEY=<api-key>
@@ -696,3 +756,129 @@ API-ключи не сериализуются. Сбор метаданных н
 конвейер с реальным storage, Docker-runner и Catalogue: исправление синтаксиса,
 импорта и фикстуры, сохранение версий и отказ от ремонта падающего assert.
 Ответы генератора/ремонта заданы в тесте; платный LLM не вызывается.
+
+### Самокоррекция, рекомендации и выбор инструментов — ТЗ v3, 4.1.7
+
+**4.1.7.1.** Конвейер исправляет конкретные ошибки тестового кода: безопасно
+восстанавливаемые двоеточия в заголовках, известные ошибки импортов pytest/requests
+и известные соответствия фикстур. Перед вызовом модели проверяется, относится ли
+ошибка к поддерживаемому исправлению. Неизвестный `NameError`, неоднозначный
+синтаксис и неизвестная фикстура отправляются на проверку человеком без
+бесполезного self-repair. Кандидат проходит сравнение AST: изменения assert,
+данных запроса, URL, метода, декораторов, порядка исполнения и других тестов
+отклоняются. Недоступность стенда, таймаут и падение проверки API не вызывают ремонт.
+
+`--max-repair-attempts` / `TESTGEN_MAX_REPAIR_ATTEMPTS` задают предел попыток;
+`0` отключает ремонт. Дополнительные ограничения — бюджет выходных токенов и
+остановка при повторе ошибки. Каждая версия сохраняется отдельно.
+Ответ генерации с `finish_reason=length` отклоняется с точной диагностикой
+обрезания; не считается исполняемым набором и не исправляется как ошибка API.
+
+**4.1.7.2.** `generation-report.json` и `.md` содержат `recommendations`:
+подозреваемые расхождения, предложения по уточнению контракта, операции и
+документированные ответы, не встречавшиеся в записанных запросах, ошибки для
+ручной проверки и рекомендации по восстановлению окружения. Контракт и assert
+по этим предложениям автоматически не меняются.
+
+Доверенный `api_client` записывает метод, путь, статус ответа и pytest nodeid
+в события runner. Заголовки, тела, query-параметры и ключи не записываются.
+Наблюдения сохраняются в `http_observations`; максимум 2000 на прогон.
+Старый образ, отсутствие наблюдений, неполный прогон или превышение лимита
+дают неизвестное покрытие (`null`), а не выдуманный перечень или процент.
+Область наблюдения — вызовы `api_client`; произвольные другие HTTP-клиенты
+не отслеживаются. Для EvoMaster используются явные `coveredHttpStatus` из
+его отчёта. Это списки для рекомендаций; модуль метрик не изменяется.
+Для агента LangChain `ToolMessage.content` ограничивается сводкой, полные факты
+передаются через `artifact` и сохраняются в отчётах. Оркестратор восстанавливает
+полный вход для существующего evaluate после завершения LLM, без правок его кода.
+
+После обновления доверенного worker пересоберите образ один раз:
+
+```powershell
+docker build -t api-contract-pytest-runner:step5 src/prototype/service_tools/runner
+```
+
+**4.1.7.3.** `--test-intent` задаёт ситуацию и выбор инструмента агентом:
+
+| Значение | Инструмент | Назначение |
+|---|---|---|
+| `quick` | Schemathesis | Быстрая контрактная проверка |
+| `deep` | EvoMaster | Глубокий поиск по явному запросу |
+| `mock` | Microcks | Импорт API и создание моков |
+| `multi` | Microcks | Conformance-проверка выбранным protocol runner |
+
+В обычном прежнем режиме первым инструментом остаётся Schemathesis.
+В режиме `--test-intent` зарегистрирован инструмент с фиксированными настройками
+и пустыми аргументами. LLM не задаёт адреса, сеть, файлы и лимиты; повторный
+вызов возвращает сохранённый результат. Агент получает ограниченную сводку
+(до 6000 символов), полные факты и рекомендации сохраняются в `tool-report.json`/`.md`.
+`--generate`, `--inspect-contract` и `--test-intent` — отдельные режимы.
+
+Из каталога `prototype`, при подготовленном сервисе Schemathesis:
+
+```powershell
+py -3.12 -m uv run --locked tester ../benchmark/catalogue/catalogue.swagger.json --test-intent quick --base-url http://catalogue:8080 --schemathesis-url http://127.0.0.1:8080 --tool-timeout 30 --report-dir "$env:TEMP/api-contract-tools"
+```
+
+Контрактный инструмент запускается на стороне своего сервиса: `base_url` должен
+быть доступен оттуда. Для глубокого поиска подготовьте фиксированный образ
+`docker pull webfuzzing/evomaster:v6.1.1`, затем замените `quick` на `deep`,
+добавьте `--network pytest-runner-catalogue_api` и уберите `--schemathesis-url`.
+EvoMaster получает нормализованный JSON, лимит поиска и отдельный каталог
+результатов; image не скачивается при каждом запуске. Его сгенерированные
+unittest-файлы сохраняются как артефакты поиска и автоматически не исполняются
+на хосте. Нет результата, пустой прогон или ошибка инструмента не считаются успехом.
+
+Microcks должен быть доступен по `--microcks-url` (по умолчанию localhost:8585).
+`mock` импортирует OpenAPI, для которого нужны `info.title` и `info.version`;
+`multi` запускает асинхронную проверку и ожидает фактическое завершение.
+`--microcks-service-id` позволяет использовать уже импортированную API-версию,
+`--microcks-runner` — выбрать `OPEN_API_SCHEMA`, `GRPC_PROTOBUF` и другие
+поддерживаемые сервером стратегии. Токен защищённого Microcks передаётся через
+`MICROCKS_TOKEN` в окружении; он не является аргументом LLM.
+
+Для локального Microcks подготовьте `quay.io/microcks/microcks-uber:1.11.0`.
+Например, при уже работающем стенде Catalogue:
+
+```powershell
+docker pull quay.io/microcks/microcks-uber:1.11.0
+docker run -d --name api-contract-microcks --network pytest-runner-catalogue_host-access -p 127.0.0.1:8585:8080 quay.io/microcks/microcks-uber:1.11.0
+docker network connect pytest-runner-catalogue_api api-contract-microcks
+```
+
+Для существующего Schemathesis используйте его Dockerfile/compose из раздела
+запуска сервисов; чтобы обращаться к `http://catalogue:8080`, подключите контейнер
+`schemathesis-svc` также к `pytest-runner-catalogue_api`. При остановке своих
+сервисов удаляйте их по точному имени, сохраняя стенд и его данные.
+
+Инструменты можно запускать напрямую обычным кодом, без LLM:
+
+```powershell
+py -3.12 -m uv run --locked python -m prototype.service_tools.selection ../benchmark/catalogue/catalogue.swagger.json --base-url http://catalogue:8080 --output-dir "$env:TEMP/api-contract-tools"
+```
+
+В этой команде по умолчанию используется `quick`. Для `deep` укажите
+`--intent deep --network pytest-runner-catalogue_api`.
+Для multi-protocol Microcks предварительно импортирует соответствующие артефакты
+своим API/UI. Например, gRPC требует protobuf и примеры запросов/ответов;
+после импорта можно использовать прямую команду:
+
+```powershell
+py -3.12 -m uv run --locked python -m prototype.service_tools.selection C:/path/service.proto --intent multi --microcks-service-id SERVICE_ID --microcks-runner GRPC_PROTOBUF --base-url http://grpc-service:9090 --microcks-url http://127.0.0.1:8585 --output-dir "$env:TEMP/api-contract-tools"
+```
+
+Для gRPC Microcks также требует URI `http://` или `https://`, обозначающий
+обычный транспорт или TLS. Настройки runner фиксируются вызывающим кодом;
+парсер генератора продолжает работать с OpenAPI/Swagger.
+Сервисы инструментов подключайте к API-сети и, при необходимости публикации
+портов, к host-access. Выделенная runner-сеть должна содержать только Catalogue.
+
+Протоколы адаптеров сверены с [EvoMaster CLI](https://github.com/WebFuzzing/EvoMaster/blob/master/docs/blackbox.md),
+[Microcks API](https://microcks.io/documentation/references/apis/open-api/)
+и [параметрами Microcks tests](https://microcks.io/documentation/references/test-endpoints/).
+В проверке 2026-10-12 реально выполнены Schemathesis 4.25.2, EvoMaster v6.1.1,
+Microcks 1.11.0 (REST mock, REST conformance и GRPC_PROTOBUF), а также Qwen
+`qwen3.8-flash-next`: ремонт фикстуры с последующим изолированным прогоном,
+генерация `/tags` и вызов Microcks агентом. Большой ответ генерации Catalogue
+при лимите 4096 токенов оказался обрезан; это не подтверждает генерацию всего
+контракта. Платные проверки остаются отдельными от обычных тестов и CI.

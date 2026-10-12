@@ -28,6 +28,22 @@ class EventReporter:
         self.calls = set()
         self.teardowns = set()
         self.unproven = False
+        self.current_nodeid = None
+        self.http_count = 0
+
+    def pytest_runtest_setup(self, item):
+        self.current_nodeid = item.nodeid
+
+    def observe_http(self, **event):
+        if not self.current_nodeid:
+            return
+        if self.http_count >= 2000:
+            if self.http_count == 2000:
+                self.emit("http_incomplete")
+            self.http_count += 1
+            return
+        self.http_count += 1
+        self.emit("http", nodeid=self.current_nodeid, **event)
 
     def emit(self, kind, **fields):
         self.stream.write(json.dumps({"kind": kind, **fields}, ensure_ascii=True) + "\n")
@@ -78,7 +94,12 @@ def _run_pytest(suite_dir: str, events_path: str, plugins, *, collect_only=False
         args.append("--collect-only")
     with open(events_path, "w", encoding="utf-8") as stream:
         reporter = EventReporter(stream)
-        reporter.emit("start", version=1)
+        observing = False
+        for plugin in plugins:
+            if hasattr(plugin, "observe_http"):
+                plugin.observe_http = reporter.observe_http
+                observing = True
+        reporter.emit("start", version=1, http_observation="api_client" if observing else None)
         code = int(pytest.main(args, plugins=[reporter, *plugins]))
         if require_all_passed and (
             reporter.unproven or not reporter.calls or reporter.calls != reporter.teardowns

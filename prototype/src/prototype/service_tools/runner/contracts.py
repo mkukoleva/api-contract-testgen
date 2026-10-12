@@ -182,10 +182,22 @@ class RunResult:
     compatibility_issues: tuple[CompatibilityIssue, ...] = ()
     error_message: str | None = None
     report_paths: dict[str, Path | str] = field(default_factory=dict)
+    # None: an older/offline worker has no HTTP evidence. Empty tuple: observed
+    # service run with zero api_client responses. Never infer this from AST.
+    http_observations: tuple[dict, ...] | None = None
+    http_observations_complete: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", RunStatus(self.status))
         object.__setattr__(self, "tests", tuple(self.tests))
+        if self.http_observations is not None:
+            observations = tuple(dict(item) for item in self.http_observations)
+            for item in observations:
+                if (not isinstance(item.get("nodeid"), str) or not isinstance(item.get("method"), str)
+                    or not isinstance(item.get("path"), str) or not item["path"].startswith("/")
+                    or type(item.get("status_code")) is not int or not 100 <= item["status_code"] <= 599):
+                    raise ValueError("invalid HTTP observation")
+            object.__setattr__(self, "http_observations", observations)
         object.__setattr__(self, "collection_errors", tuple(self.collection_errors))
         object.__setattr__(self, "compatibility_issues",
                            tuple(self.compatibility_issues))
@@ -224,4 +236,6 @@ class RunResult:
             ],
             "error_message": self.error_message,
             "report_paths": {name: str(path) for name, path in self.report_paths.items()},
+            "http_observations": list(self.http_observations) if self.http_observations is not None else None,
+            "http_observations_complete": self.http_observations_complete,
         }

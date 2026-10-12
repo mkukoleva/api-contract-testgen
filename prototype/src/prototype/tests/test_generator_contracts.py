@@ -62,7 +62,7 @@ def test_settings_ignore_invalid_env_and_keep_default(monkeypatch):
     ("output_root", " ", "output_root"),
     ("runner_timeout_seconds", 0, "runner_timeout_seconds"),
     ("runner_timeout_seconds", True, "runner_timeout_seconds"),
-    ("max_repair_attempts", 0, "max_repair_attempts"),
+    ("max_repair_attempts", -1, "max_repair_attempts"),
     ("max_repair_attempts", True, "max_repair_attempts"),
     ("max_repair_attempts", 2.5, "max_repair_attempts"),
     ("repair_token_budget", -1, "repair_token_budget"),

@@ -59,6 +59,8 @@ def read_result(events_path: Path, duration_seconds: float) -> RunResult:
     collection_errors = []
     exit_code = None
     interruption = None
+    observations = None
+    observations_complete = True
     try:
         if events_path.stat().st_size > MAX_EVENTS_BYTES:
             raise ValueError("worker event file exceeds 8 MiB")
@@ -68,7 +70,24 @@ def read_result(events_path: Path, duration_seconds: float) -> RunResult:
                     break  # A forced kill can interrupt the last write.
                 event = json.loads(line)
                 kind = event["kind"]
-                if kind == "phase":
+                if kind == "start":
+                    if event.get("http_observation") == "api_client":
+                        observations = []
+                elif kind == "http":
+                    if observations is None:
+                        raise ValueError("HTTP observation without start marker")
+                    if len(observations) >= 2000:
+                        observations_complete = False
+                    else:
+                        item = {key: event[key] for key in ("nodeid", "method", "path", "status_code")}
+                        if (not isinstance(item["nodeid"], str) or not isinstance(item["method"], str)
+                            or not isinstance(item["path"], str) or not item["path"].startswith("/")
+                            or type(item["status_code"]) is not int or not 100 <= item["status_code"] <= 599):
+                            raise ValueError("invalid HTTP observation")
+                        observations.append(item)
+                elif kind == "http_incomplete":
+                    observations_complete = False
+                elif kind == "phase":
                     phase = event["phase"]
                     if phase not in {"setup", "call", "teardown"}:
                         raise ValueError("invalid pytest phase")
@@ -123,7 +142,9 @@ def read_result(events_path: Path, duration_seconds: float) -> RunResult:
     if status == RunStatus.INFRASTRUCTURE_ERROR:
         error = "pytest did not finish" if exit_code is None else f"pytest internal/usage error ({exit_code})"
     return RunResult(status, exit_code, duration_seconds, tests=tuple(tests),
-                     collection_errors=tuple(collection_errors), error_message=error)
+                     collection_errors=tuple(collection_errors), error_message=error,
+                     http_observations=tuple(observations) if observations is not None else None,
+                     http_observations_complete=observations_complete)
 
 
 def read_collection(collect_events_path: Path, duration_seconds: float) -> tuple[bool, RunResult | None]:

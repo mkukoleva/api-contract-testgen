@@ -87,7 +87,8 @@ def generate_suite(
     except ValueError as exc:
         return {"prepared": (), "errors": (f"invalid generation context: {exc}",),
                 "tokens": (0, 0, 0), "calls": 0}
-    user_prompt = build_generation_prompt(contract_fragment)
+    user_prompt = build_generation_prompt(contract_fragment,
+        source_context=(settings.source_context or {}).get("text", ""))
 
     try:
         message = llm.invoke(
@@ -106,6 +107,9 @@ def generate_suite(
         }
 
     input_tokens, output_tokens, total_tokens = request_usage(message)
+    if (getattr(message, "response_metadata", None) or {}).get("finish_reason") == "length":
+        return {"prepared": (), "errors": ("generation output truncated by model token limit; use a smaller contract or increase the configured output limit",),
+                "tokens": (input_tokens, output_tokens, total_tokens), "calls": 1}
     content = getattr(message, "content", "")
     if isinstance(content, list):
         content = "\n".join(

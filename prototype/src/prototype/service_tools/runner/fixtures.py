@@ -11,6 +11,11 @@ is reachable, and the policy suite verifies that before generated tests run.
 import os
 
 import pytest
+from urllib.parse import urlsplit
+
+
+def observe_http(**event):
+    """Worker installs its event sink; direct fixture use has no side effects."""
 
 
 @pytest.fixture
@@ -45,7 +50,10 @@ def api_client(base_url):
         def send(self, request, **kwargs):
             kwargs["allow_redirects"] = False
             kwargs.setdefault("timeout", (min(timeout, 10.0), timeout))
-            return super().send(request, **kwargs)
+            response = super().send(request, **kwargs)
+            observe_http(method=request.method.upper(), path=urlsplit(request.url).path[:2048] or "/",
+                         status_code=response.status_code)
+            return response
 
     session = _Client()
     # Never inherit HTTP(S)_PROXY / NO_PROXY from the environment; the

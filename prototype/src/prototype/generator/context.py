@@ -16,7 +16,7 @@ from ..parser.contract import HTTP_METHODS, ContractInputError, _load_contract, 
 
 def load_contract(path: Path | str) -> dict[str, Any]:
     """Read a JSON/YAML OpenAPI or Swagger contract as a dict."""
-    return _load_contract(Path(path))
+    return _load_contract(path)
 
 
 def match_contract_path(contract_path: str, observed: str) -> bool:

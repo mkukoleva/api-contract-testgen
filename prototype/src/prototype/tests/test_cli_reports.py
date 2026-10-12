@@ -20,7 +20,9 @@ def test_cli_runs_at_same_time_keep_both_reports_and_metrics(tmp_path, monkeypat
     monkeypatch.setattr(prototype, "build_agent", lambda: SimpleNamespace(
         invoke=lambda _: {"value": next(outcomes), "messages": []}))
     monkeypatch.setattr(prototype, "_extract_final_message", lambda result: result["value"])
-    monkeypatch.setattr(contract, "read_contract_summary", lambda _: {"operation_count": 1})
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "contract.yaml").write_text(
+        "openapi: 3.0.3\npaths:\n  /items:\n    get: {}", encoding="utf-8")
 
     prototype.run("contract.yaml")
     first = next(tmp_path.rglob("report_*.md"))

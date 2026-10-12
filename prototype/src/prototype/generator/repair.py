@@ -14,6 +14,7 @@ Boundaries (TZ ARQA v3, 4.1.7.1 / ADR 0004):
 import ast
 from dataclasses import dataclass
 import re
+import tokenize
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -603,3 +604,22 @@ def apply_repair(files: dict[str, str], target: RepairTarget, fixed: str) -> dic
         validate_repair(before, after, function_path=target.function_path, message=target.message)
         updated[target.file] = candidate
     return updated
+
+
+def supported_repair(code: str, target: RepairTarget) -> bool:
+    """Avoid paying for errors the safety guard cannot correct unambiguously."""
+    from .repair_safety import _FIXTURES, syntax_reference
+    if target.reason == "fixture":
+        match = re.search(r"fixture ['\"]([^'\"]+)['\"] not found", target.message or "")
+        return bool(match and match.group(1) in _FIXTURES and target.function_path)
+    try:
+        ast.parse(code)
+    except SyntaxError:
+        try:
+            syntax_reference(code)
+        except (ValueError, SyntaxError, tokenize.TokenError):
+            return False
+        return True
+    message = target.message or ""
+    return bool(re.search(r"(?:NameError: name ['\"](?:pytest|requests)['\"]|"
+                          r"(?:ModuleNotFoundError|ImportError):.*['\"](?:pytes|request|pytest|requests)['\"])", message))

@@ -11,6 +11,7 @@ visible to the repair loop instead of being hidden by storage's rejected/.
 """
 
 import os
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,12 +32,13 @@ from ..service_tools.runner.contracts import (
     RunStatus,
     TestOutcome,
 )
-from .context import load_contract
 from .contracts import GenerationRun, GenerationSettings, RepairAttempt
 from .generate import generate_suite
-from .repair import apply_repair, classify_result, repair_call
+from .repair import apply_repair, classify_result, repair_call, supported_repair
+from ..reports.recommendations import build_recommendations
 from .prompts import prompt_versions
-from ..parser.contract import contract_provenance
+from ..parser.contract import load_contract_document, save_contract_snapshot
+from ..parser.source_context import read_source_context
 
 _TERMINAL_INFRA_STATUSES = (
     RunStatus.INFRASTRUCTURE_ERROR,
@@ -139,6 +141,7 @@ def run_generation_pipeline(
         return GenerationRun("infrastructure_error", settings.contract_path, settings.model,
                              0, 0, 0, 0, generator_errors=(f"creating run directory failed: {exc}",))
     settings = replace(settings, output_dir=run_dir)
+    original_source = settings.input_document.source if settings.input_document else settings.contract_path
     from ..llm.model import describe_model, runtime_versions
     provenance = {
         "contract": {}, "llm": describe_model(model), "prompts": prompt_versions(),
@@ -149,18 +152,26 @@ def run_generation_pipeline(
                    "max_repair_attempts": settings.max_repair_attempts,
                    "repair_token_budget": settings.repair_token_budget},
     }
+    contract = {}
 
     def early_failure(message: str, status: str = "generation_error") -> GenerationRun:
         return _save_report(GenerationRun(
-            status, settings.contract_path, settings.model, 0, 0, 0, 0,
+            status, original_source, settings.model, 0, 0, 0, 0,
             generator_errors=(message,), runnability=compute_runnability((), None).to_dict(),
-            provenance=provenance), settings)
+            provenance=provenance, recommendations=build_recommendations(contract, {"status": status})), settings)
 
     # Validate input before constructing a provider client. An input failure
     # never reaches generation/runner and still has a per-run report.
     try:
-        contract = load_contract(settings.contract_path)
-        provenance["contract"] = contract_provenance(contract, settings.contract_path)
+        document = settings.input_document or load_contract_document(settings.contract_path)
+        contract = document.data
+        provenance["contract"] = save_contract_snapshot(document, run_dir / "inputs")
+        source_context = settings.source_context or read_source_context(settings.source_code_path, contract)
+        provenance["source_code"] = source_context["metadata"]
+        (run_dir / "inputs" / "source-context.json").write_text(
+            json.dumps(source_context, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        settings = replace(settings, contract_path=Path(provenance["contract"]["snapshot_path"]),
+                           input_document=document, source_context=source_context)
     except (OSError, ValueError, UnicodeError) as exc:
         return early_failure(f"loading contract failed: {exc}")
 
@@ -204,7 +215,7 @@ def run_generation_pipeline(
         return _save_report(
             GenerationRun(
                 status=status,
-                contract_path=settings.contract_path,
+                contract_path=original_source,
                 model=settings.model,
                 attempts=0,
                 input_tokens=gen_input,
@@ -214,6 +225,7 @@ def run_generation_pipeline(
                 test_cases=(),
                 runnability=compute_runnability((), None).to_dict(),
                 provenance=provenance,
+                recommendations=build_recommendations(contract, {"status": status}),
             ),
             settings,
         )
@@ -224,6 +236,7 @@ def run_generation_pipeline(
     log: list[dict[str, Any]] = []
     defects: list[dict[str, Any]] = []
     environmental: list[dict[str, Any]] = []
+    review_required: list[str] = []
     artifact_failed = False
 
     def save_attempt(index: int, files: dict[str, str], extra: dict[str, Any] | None = None) -> None:
@@ -294,7 +307,14 @@ def run_generation_pipeline(
         plan = classify_result(contract, files_map, run, settings)
         defects.extend(plan.suspected_defects)
         environmental.extend(plan.environmental)
-        repairable = [target for target in plan.targets if target.file in files_map]
+        repairable = []
+        for target in plan.targets:
+            if target.file not in files_map:
+                continue
+            if supported_repair(files_map[target.file], target):
+                repairable.append(target)
+            else:
+                review_required.append(target.identifier())
 
         if not repairable:
             status = _derive_status(run)
@@ -358,6 +378,7 @@ def run_generation_pipeline(
         except Exception as exc:
             entry["outcome"] = "error"
             entry["message"] = str(exc)
+            review_required.append(target.identifier())
             status = _derive_status(run)
             break
 
@@ -373,7 +394,7 @@ def run_generation_pipeline(
     return _save_report(
         GenerationRun(
             status=status,
-            contract_path=settings.contract_path,
+            contract_path=original_source,
             model=settings.model,
             attempts=attempts_used,
             input_tokens=gen_input + repair_input,
@@ -389,6 +410,9 @@ def run_generation_pipeline(
             test_cases=expected,
             runnability=compute_runnability(expected, run_result_dict).to_dict(),
             provenance=provenance,
+            recommendations=build_recommendations(contract, run_result_dict,
+                suspected_defects=defects, environmental=environmental,
+                review_required=tuple(dict.fromkeys(review_required))),
         ),
         settings,
     )
