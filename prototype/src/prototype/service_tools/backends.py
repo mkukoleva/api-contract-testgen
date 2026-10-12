@@ -31,6 +31,8 @@ def run_schemathesis(settings):
     if not isinstance(counts, dict) or any(type(counts.get(key)) is not int or counts[key] < 0
             for key in ("total", "passed", "failed", "errors", "skipped")):
         raise ValueError("Schemathesis scenario counts are invalid")
+    if counts["total"] != sum(counts[key] for key in ("passed", "failed", "errors", "skipped")):
+        raise ValueError("Schemathesis scenario counts contradict total")
     return {"backend": "schemathesis", "status": "completed" if counts["total"] else "no_tests", "summary": counts,
             "success": bool(counts["total"]) and not any(counts[key] for key in ("failed", "errors")),
             "failures": raw.get("failures", []), "duration_seconds": raw.get("running_time"), "raw": raw}
@@ -81,19 +83,29 @@ def run_evomaster(settings):
         raise ValueError("EvoMaster report has no valid totalTests")
     failures = [{"operation": fault.get("operationId"), "title": "EvoMaster found a fault",
                  "categories": fault.get("faultCategories", [])} for fault in faults.get("foundFaults", [])]
-    observations = []
-    for case in raw.get("problemDetails", {}).get("rest", {}).get("coveredHttpStatus", []):
+    details = raw.get("problemDetails", {})
+    rest = details.get("rest", {}) if isinstance(details, dict) else {}
+    evidence = rest.get("coveredHttpStatus") if isinstance(rest, dict) else None
+    observations = [] if isinstance(evidence, list) else None
+    observations_complete = True
+    for case in evidence if isinstance(evidence, list) else ():
+        if not isinstance(case, dict) or not isinstance(case.get("httpStatus"), list):
+            observations_complete = False
+            continue
         method, separator, path = str(case.get("endpointId", "")).partition(":")
-        if not separator or not path.startswith("/"):
+        if not separator or not path.startswith("/") or method.lower() not in {"get", "post", "put", "patch", "delete", "head", "options", "trace"}:
+            observations_complete = False
             continue
         for status in case.get("httpStatus", []):
             if type(status) is int and 100 <= status <= 599:
                 observations.append({"nodeid": case.get("testCaseId", ""), "method": method,
                                      "path": path, "status_code": status})
+            else:
+                observations_complete = False
     return {"backend": "evomaster", "status": "completed" if raw["totalTests"] else "no_tests", "duration_seconds": time.monotonic() - started,
         "summary": {"generated_files": len(list(settings.output_dir.rglob("*.py"))),
                     "tests": raw.get("totalTests"), "faults": faults.get("totalNumber")},
-        "failures": failures, "http_observations": observations if "rest" in raw.get("problemDetails", {}) else None, "raw": raw,
+        "failures": failures, "http_observations": observations, "http_observations_complete": observations_complete, "raw": raw,
         "generated_tests_executed": False}
 
 

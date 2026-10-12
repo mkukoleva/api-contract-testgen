@@ -1,5 +1,10 @@
 # Сохранение сгенерированных тестов (ТЗ 2.1.6) — план реализации
 
+> Исторический план по прежнему ТЗ; команды, пути и фрагменты README ниже
+> сохраняются как история решения. Текущая реализация и безопасный порядок
+> запуска — в [ADR 0003](../../adr/0003-generated-tests-storage.md) и
+> [README прототипа](../../../prototype/ReadMe.md). Не выполняйте этот план повторно.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Пакет `prototype.storage`, который сохраняет pytest-код генератора как неизменяемую версию `generated/<slug>/<run_id>/` с `manifest.json`, проверкой синтаксиса и `pytest --collect-only`, плюс tool агента `save_tests_tool`.

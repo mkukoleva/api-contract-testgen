@@ -17,6 +17,26 @@ SPEC = {"openapi": "3.1.0", "info": {"title": "Items API", "version": "2.0"},
         "paths": {"/items": {"get": {"responses": {"200": {"description": "OK"}}}}}}
 
 
+@pytest.mark.parametrize("responses", [None, [], "200"])
+def test_invalid_response_mapping_is_rejected_before_generation(tmp_path, responses):
+    from prototype.parser.contract import ContractInputError
+    source = tmp_path / "invalid.json"
+    source.write_text(json.dumps({"openapi": "3.0.3", "paths": {
+        "/items": {"get": {"responses": responses}}}}), encoding="utf-8")
+    with pytest.raises(ContractInputError, match="responses"):
+        read_contract_summary(source)
+
+
+@pytest.mark.parametrize("example", ["!!binary aGVsbG8=", ".nan", ".inf", "!!set {a: null}"])
+def test_non_json_yaml_values_have_a_readable_input_error(tmp_path, example):
+    from prototype.parser.contract import ContractInputError
+    source = tmp_path / "invalid.yaml"
+    source.write_text("openapi: 3.0.3\npaths:\n  /items:\n    get: {}\nx-example: " + example,
+                      encoding="utf-8")
+    with pytest.raises(ContractInputError, match="JSON"):
+        read_contract_summary(source)
+
+
 @pytest.fixture
 def schema_server(request):
     requests = []

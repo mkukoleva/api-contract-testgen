@@ -139,12 +139,14 @@ def create_selected_tool(settings, *, execute_fn=None):
         with lock:
             if not cached:
                 data = (execute_fn or execute_selected)(settings)
-                cached.append({"tool": backend + "_tool", **compact_result(data)})
+                full = {"tool": backend + "_tool", **data}
+                cached.append(({"tool": backend + "_tool", **compact_result(data)}, full))
         return cached[0]
     descriptions = {"schemathesis": "Quick contract check requested by the user.",
                     "evomaster": "Deep black-box search explicitly requested by the user.",
                     "microcks": "API mocks or multi-protocol checks requested by the user."}
-    return Bound.from_function(invoke_selected, name=backend + "_tool", description=descriptions[backend], args_schema=Input)
+    return Bound.from_function(invoke_selected, name=backend + "_tool", description=descriptions[backend], args_schema=Input,
+                               response_format="content_and_artifact")
 
 
 def main():

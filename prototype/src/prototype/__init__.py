@@ -58,7 +58,7 @@ SYSTEM_PROMPT = """
    - contract_path — путь к контракту (возьми из поля "file"
      краткого описания контракта);
    - base_url — адрес тестируемого API, всегда
-     "http://127.0.0.1:9911".
+     "http://catalogue:8080" (из контейнера Schemathesis в API-сети стенда).
    После успешного выполнения повторно его не вызывай.
 2. Затем вызови demo_api_test_tool, чтобы продемонстрировать
    тестирование API. После успешного выполнения повторно его не вызывай.
@@ -88,6 +88,16 @@ def _record_model(agent, model):
     return agent
 
 
+def testing_system_prompt(settings):
+    from .service_tools.selection import select_backend
+    backend = select_backend(settings.intent)
+    return (f"Запрос пользователя: {settings.intent}. Вызови {backend}_tool один раз с пустыми аргументами. "
+            "Доверенный оркестратор выбрал инструмент: Schemathesis для быстрой проверки, "
+            "EvoMaster для глубокого поиска, Microcks для моков и multi-protocol. "
+            "Сообщи фактический статус и рекомендации из результата. Ошибка или неполный прогон не являются успехом. "
+            "Подробности находятся в сохранённом отчёте; не меняй контракт и проверки ради зелёного результата.")
+
+
 def build_agent(*, generation_settings=None, testing_settings=None):
     """
     Создать LangChain-агента.
@@ -106,14 +116,9 @@ def build_agent(*, generation_settings=None, testing_settings=None):
     model = build_model()
 
     if testing_settings is not None:
-        from .service_tools.selection import create_selected_tool, select_backend
-        backend = select_backend(testing_settings.intent)
+        from .service_tools.selection import create_selected_tool
         return _record_model(create_agent(model=model, tools=[create_selected_tool(testing_settings)],
-            system_prompt=(f"Запрос пользователя: {testing_settings.intent}. Вызови {backend}_tool один раз с пустыми аргументами. "
-                           "Доверенный оркестратор выбрал инструмент: Schemathesis для быстрой проверки, "
-                           "EvoMaster для глубокого поиска, Microcks для моков и multi-protocol. "
-                           "Сообщи фактический статус и рекомендации из результата. Ошибка или неполный прогон не являются успехом. "
-                           "Подробности находятся в сохранённом отчёте; не меняй контракт и проверки ради зелёного результата.")), model)
+            system_prompt=testing_system_prompt(testing_settings)), model)
 
     if generation_settings is not None:
         from .service_tools.runner.tools import create_generation_tool
@@ -357,8 +362,10 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
                 if data.get("tool") == select_backend(testing_settings.intent) + "_tool":
                     external_results.append(data)
         from .service_tools.runner.tools import _compact_generation_result
+        from .service_tools.selection import compact_result
         print("[TOOLS] Фактические результаты инструмента (подробности в отчёте):")
-        print(json.dumps([*(_compact_generation_result(data) for data in generation_results), *external_results],
+        print(json.dumps([*(_compact_generation_result(data) for data in generation_results),
+                          *(compact_result(data) for data in external_results)],
                          ensure_ascii=False, indent=2))
 
     print()
@@ -369,12 +376,18 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
 
     from .llm.model import describe_model, runtime_versions
     from .generator.prompts import prompt_versions
+    tool_artifacts = [message.artifact for message in result.get("messages", [])
+                      if isinstance(getattr(message, "artifact", None), dict)]
+    if tool_artifacts:
+        (run_dir / "tool-results.json").write_text(
+            json.dumps(tool_artifacts, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    active_prompt = (testing_system_prompt(testing_settings) if testing_settings is not None else
+                     PYTEST_SYSTEM_PROMPT if generation_settings is not None else SYSTEM_PROMPT)
     provenance = {
         "contract": identity,
         "source_code": source_context["metadata"],
         "llm": getattr(agent, "_prototype_model_metadata", describe_model(None)),
-        "prompts": {**prompt_versions(), "agent_sha256": hashlib.sha256(
-            (PYTEST_SYSTEM_PROMPT if generation_settings is not None else SYSTEM_PROMPT).encode("utf-8")).hexdigest()},
+        "prompts": {**prompt_versions(), "agent_sha256": hashlib.sha256(active_prompt.encode("utf-8")).hexdigest()},
         "runtime": runtime_versions(),
         "generation_reports": [data.get("report_paths") for data in generation_results],
         "tool_reports": [data.get("report_paths") for data in external_results],
@@ -514,8 +527,8 @@ def main() -> None:
     parser.add_argument("--microcks-service-id", help="ID уже импортированного сервиса Microcks.")
     parser.add_argument("--microcks-runner", help="Microcks runner, по умолчанию OPEN_API_SCHEMA; доступен GRPC_PROTOBUF.")
     parser.add_argument("--evomaster-image", help="Подготовленный Docker-образ EvoMaster; по умолчанию webfuzzing/evomaster:v6.1.1.")
-    parser.add_argument("--base-url", help="Адрес тестируемого API для --generate.")
-    parser.add_argument("--network", help="Docker-сеть тестируемого API для --generate.")
+    parser.add_argument("--base-url", help="Адрес тестируемого API для --generate или --test-intent.")
+    parser.add_argument("--network", help="Docker-сеть API для --generate или --test-intent deep.")
     parser.add_argument("--blocked-network", action="append", default=[], help="Запрещённая Docker-сеть (можно повторять).")
     parser.add_argument("--runner-timeout", type=float, default=None, help="Общий лимит сбора и запуска, по умолчанию 60 с.")
     parser.add_argument("--max-repair-attempts", type=int, default=None, help="Лимит попыток ремонта; по умолчанию из окружения или 3.")

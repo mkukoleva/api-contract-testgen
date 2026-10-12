@@ -40,3 +40,53 @@ def test_primary_cli_passes_complete_tool_facts_to_existing_metrics(tmp_path,mon
     prototype.run(str(source),report_dir=tmp_path/'reports',generation_settings=settings)
     assert len(captured[0]['suspected_defects'])==100
     assert len(message.content)<=6000
+
+
+def test_selected_tool_keeps_full_facts_in_artifact_and_compact_content(tmp_path):
+    from prototype.service_tools.selection import ToolSettings, create_selected_tool
+    failures = [{"operation": "GET /items", "message": "X" * 5000}] * 100
+    tool = create_selected_tool(ToolSettings("api.json", "http://api:8080", output_dir=tmp_path),
+        execute_fn=lambda settings: {"backend": "schemathesis", "status": "completed", "success": False,
+            "summary": {"failed": 100}, "failures": failures, "raw": {"failures": failures}})
+    message = tool.invoke({"type": "tool_call", "name": "schemathesis_tool", "args": {}, "id": "one"})
+    assert len(message.content) <= 6000
+    assert message.artifact["failures"] == failures
+    assert json.loads(message.content)["summary"]["failed"] == 100
+
+
+def test_default_schemathesis_tool_also_keeps_large_details_out_of_model_content(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from prototype.service_tools.runner.tools import schemathesis_tool
+    source = tmp_path / "api.yaml"
+    source.write_text("openapi: 3.0.3\npaths: {/items: {get: {}}}", encoding="utf-8")
+    failures = [{"operation": "GET /items", "message": "X" * 5000}] * 100
+    payload = {"status": "success", "operations": 1, "scenarios": {
+        "total": 100, "passed": 0, "failed": 100, "errors": 0, "skipped": 0}, "failures": failures}
+    monkeypatch.setattr("prototype.service_tools.runner.tools.requests.post", lambda *a, **kw:
+                        SimpleNamespace(status_code=200, json=lambda: payload))
+    message = schemathesis_tool.invoke({"type": "tool_call", "name": "schemathesis_tool",
+        "args": {"contract_path": str(source), "base_url": "http://api:8080"}, "id": "one"})
+    assert len(message.content) <= 6000
+    assert message.artifact["failures"] == failures
+    assert json.loads(message.content)["scenarios"]["failed"] == 100
+
+
+def test_selected_tool_agent_records_its_actual_prompt_hash(tmp_path, monkeypatch):
+    import hashlib
+    import prototype
+    from types import SimpleNamespace
+    from prototype.service_tools.selection import ToolSettings
+    source = tmp_path / "api.yaml"
+    source.write_text("openapi: 3.0.3\npaths: {/items: {get: {}}}", encoding="utf-8")
+    settings = ToolSettings(source, intent="mock", output_dir=tmp_path)
+    agent = SimpleNamespace(stream=lambda *a, **kw: iter([{"messages": []}]))
+    prompts = []
+    def create(**kwargs):
+        prompts.append(kwargs["system_prompt"])
+        return agent
+    monkeypatch.setattr("langchain.agents.create_agent", create)
+    monkeypatch.setattr("prototype.llm.model.build_model", lambda: SimpleNamespace(model_name="offline"))
+    prototype.run(str(source), report_dir=tmp_path / "reports", testing_settings=settings)
+    metadata = json.loads(next((tmp_path / "reports").rglob("run-metadata.json")).read_text(encoding="utf-8"))
+    expected = hashlib.sha256(prompts[0].encode("utf-8")).hexdigest()
+    assert metadata["prompts"]["agent_sha256"] == expected

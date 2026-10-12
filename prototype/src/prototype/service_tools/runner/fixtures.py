@@ -38,6 +38,10 @@ def api_client(base_url):
     import requests
 
     timeout = float(os.environ.get("RUNNER_TIMEOUT_SECONDS", "60"))
+    target = urlsplit(base_url)
+    def origin(url):
+        return (url.scheme.lower(), url.hostname, url.port or (443 if url.scheme.lower() == "https" else 80))
+    prefix = target.path.rstrip("/")
 
     class _Client(requests.Session):
         def request(self, method, url, **kwargs):
@@ -51,8 +55,13 @@ def api_client(base_url):
             kwargs["allow_redirects"] = False
             kwargs.setdefault("timeout", (min(timeout, 10.0), timeout))
             response = super().send(request, **kwargs)
-            observe_http(method=request.method.upper(), path=urlsplit(request.url).path[:2048] or "/",
-                         status_code=response.status_code)
+            observed = urlsplit(request.url)
+            path = observed.path or "/"
+            # Loopback infrastructure and other origins are not evidence about
+            # the tested service. Contract paths are relative to its base URL.
+            if origin(observed) == origin(target) and (not prefix or path == prefix or path.startswith(prefix + "/")):
+                observe_http(method=request.method.upper(), path=path[len(prefix):] or "/",
+                             status_code=response.status_code)
             return response
 
     session = _Client()

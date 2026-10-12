@@ -117,3 +117,47 @@ def test_environment_failure_has_recovery_recommendation():
     from prototype.reports.recommendations import build_recommendations
     result = build_recommendations({}, {"status": "infrastructure_error"})
     assert any(x["kind"] == "environment" for x in result["items"])
+
+
+def test_response_extensions_are_not_recommended_as_uncovered_status_codes():
+    from prototype.reports.recommendations import build_recommendations
+    schema = {"paths": {"/items": {"get": {"responses": {"200": {}, "x-note": "documentation"}}}}}
+    result = build_recommendations(schema, {"status": "completed", "http_observations": [
+        {"method": "GET", "path": "/items", "status_code": 200}]})
+    assert result["uncovered_responses"] == []
+
+
+def test_client_observes_only_target_and_normalizes_base_path(monkeypatch):
+    import requests
+    from prototype.service_tools.runner import fixtures
+    seen = []
+    monkeypatch.setattr(fixtures, "observe_http", lambda **event: seen.append(event))
+    def send(self, request, **kwargs):
+        response = requests.Response()
+        response.status_code = 200
+        response.request = request
+        return response
+    monkeypatch.setattr(requests.Session, "send", send)
+    fixture = fixtures.api_client.__wrapped__("http://api:8080/v1")
+    try:
+        session = next(fixture)
+        session.get("http://api:8080/v1/items?secret=hidden")
+        session.get("http://other:8080/v1/items")
+        session.get("http://api:9090/v1/items")
+        session.get("http://api:8080/v10/items")
+    finally:
+        fixture.close()
+    assert seen == [{"method": "GET", "path": "/items", "status_code": 200}]
+
+
+def test_truncated_repair_response_is_not_accepted_as_a_complete_candidate():
+    from types import SimpleNamespace
+    from prototype.generator.repair import RepairTarget, repair_call
+    class Model:
+        def invoke(self, messages):
+            return SimpleNamespace(content="def test_one():\n    assert True\n", response_metadata={"finish_reason": "length"},
+                usage_metadata={"input_tokens": 10, "output_tokens": 20, "total_tokens": 30})
+    result = repair_call(Model(), GenerationSettings("api.yaml"), {},
+        RepairTarget("file", "test_one.py"), "def test_one():\n    assert True\n")
+    assert not result.ok and "truncated" in result.error
+    assert result.tokens == (10, 20, 30)

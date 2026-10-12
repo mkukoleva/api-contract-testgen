@@ -132,3 +132,30 @@ def test_missing_microcks_contract_version_recommends_fixing_input(tmp_path):
     result=execute_selected(ToolSettings(path,intent='mock',output_dir=tmp_path/'reports'))
     assert result['status']=='input_error'
     assert any(item['kind']=='contract_clarification' for item in result['recommendations']['items'])
+
+
+def test_evomaster_rest_without_explicit_observations_keeps_coverage_unknown(tmp_path, monkeypatch):
+    from prototype.service_tools.selection import ToolSettings, execute_selected
+    source = tmp_path / "api.json"
+    source.write_text(json.dumps({"openapi": "3.0.3", "paths": {"/items": {"get": {}}}}), encoding="utf-8")
+    def execute(command, **kwargs):
+        output = next(x for x in command if "dst=/generated_tests" in x).split("src=", 1)[1].split(",dst=", 1)[0]
+        from pathlib import Path
+        (Path(output) / "report.json").write_text(json.dumps({"totalTests": 1, "problemDetails": {"rest": {}}}), encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr("prototype.service_tools.backends.subprocess.run", execute)
+    result = execute_selected(ToolSettings(source, "http://api:8080", intent="deep", network="api", output_dir=tmp_path / "out"))
+    assert result["recommendations"]["basis"] == "unavailable"
+    assert result["recommendations"]["uncovered_operations"] is None
+
+
+def test_schemathesis_contradictory_counts_are_not_a_success(tmp_path, monkeypatch):
+    from prototype.service_tools.selection import ToolSettings, execute_selected
+    source = tmp_path / "api.json"
+    source.write_text(json.dumps({"openapi": "3.0.3", "paths": {"/items": {"get": {}}}}), encoding="utf-8")
+    import requests
+    response = SimpleNamespace(status_code=200, json=lambda: {"scenarios": {
+        "total": 1, "passed": 0, "failed": 0, "errors": 0, "skipped": 0}})
+    monkeypatch.setattr(requests.Session, "post", lambda *a, **kw: response)
+    result = execute_selected(ToolSettings(source, "http://api:8080", output_dir=tmp_path / "out"))
+    assert result["status"] != "completed" and result.get("success") is not True

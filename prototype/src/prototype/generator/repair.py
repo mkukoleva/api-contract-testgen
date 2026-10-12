@@ -533,6 +533,9 @@ def repair_call(
         )
 
     tokens = request_usage(message)
+    if (getattr(message, "response_metadata", None) or {}).get("finish_reason") == "length":
+        return RepairCallResult(ok=False, tokens=tokens, payload_chars=len(prompt),
+                                error="LLM repair output was truncated (finish_reason=length); candidate rejected")
     content = getattr(message, "content", "")
     if isinstance(content, list):
         content = "\n".join(

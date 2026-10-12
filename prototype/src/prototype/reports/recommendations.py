@@ -14,7 +14,11 @@ def build_recommendations(contract, run=None, *, suspected_defects=(), environme
             continue
         for method, operation in item.items():
             if method.lower() in METHODS and isinstance(operation, dict):
-                operations[(method.upper(), path)] = {str(code).upper() for code in operation.get("responses", {})}
+                responses = operation.get("responses", {})
+                operations[(method.upper(), path)] = {str(code).upper() for code in responses
+                    if str(code).lower() == "default" or (
+                        len(str(code)) == 3 and str(code)[0] in "12345"
+                        and (str(code)[1:].isdigit() or str(code)[1:].upper() == "XX"))} if isinstance(responses, dict) else set()
     items = []
     if (run or {}).get("status") in {"infrastructure_error", "timeout", "interrupted"} and not environmental:
         items.append({"kind": "environment", "action": "Проверить Docker, готовность стенда и лимит времени; повторить сохранённые тесты без изменения assert и генерации."})

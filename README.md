@@ -38,6 +38,7 @@ pytest, сохранение версий, изолированный запус
 - [Установка, запуск агента и проверки](prototype/ReadMe.md).
 - [Соглашение о pytest-runner для команды](docs/adr/0002-pytest-runner-contract.md).
 - [Сохранение сгенерированных тестов](docs/adr/0003-generated-tests-storage.md).
+- [Границы self-repair](docs/adr/0004-generation-self-repair.md).
 - [M3 по ТЗ v3: изоляция, self-repair и проверка](docs/testing/m3-verification.md).
 
 ## Проверка одной командой
@@ -53,7 +54,7 @@ uv run --project prototype --locked --no-sync python tools/verify.py
 uv run --project prototype --locked --no-sync python tools/verify.py --offline --skip-runner-set
 ```
 
-Один раз до первого запуска: `uv sync --locked` в `prototype/` и сборка образа
+Один раз до первого запуска: `uv sync --project prototype --locked` из корня и сборка образа
 runner (`docker build -t api-contract-pytest-runner:step5 prototype/src/prototype/service_tools/runner`).
 Повторные запуски не требуют правки файлов, ключей LLM и установки
 зависимостей. Обычный CI (`.github/workflows/ci.yml`) использует сохранённые

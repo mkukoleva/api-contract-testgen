@@ -14,6 +14,7 @@
 
 import json
 import hashlib
+import math
 from datetime import date, datetime
 import re
 from pathlib import Path
@@ -134,6 +135,8 @@ def _validate_structure(data: dict[str, Any], *, require_operations: bool = True
             if method.lower() in HTTP_METHODS and not isinstance(operation, dict):
                 raise ContractInputError(f"Операция {method} в paths[{route!r}] должна быть объектом.")
             if method.lower() in HTTP_METHODS:
+                if "responses" in operation and not isinstance(operation["responses"], dict):
+                    raise ContractInputError(f"Поле responses операции {method.upper()} {route} должно быть объектом.")
                 operations += 1
     if require_operations and not operations:
         raise ContractInputError("Раздел paths должен содержать хотя бы одну HTTP-операцию.")
@@ -174,7 +177,11 @@ def normalize_contract(data: dict[str, Any]) -> dict[str, Any]:
             return [expand(item, active, depth + 1, literal=literal) for item in value]
         if isinstance(value, (date, datetime)):
             return value.isoformat()  # YAML timestamps become JSON-compatible examples
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ContractInputError("JSON/YAML контракт не допускает NaN и Infinity.")
         if not isinstance(value, dict):
+            if value is not None and not isinstance(value, (str, int, float, bool)):
+                raise ContractInputError("Значения YAML контракта должны быть совместимы с JSON.")
             return value
         def child(key, item):
             # Example/default/enum values are API data, not Reference Objects.

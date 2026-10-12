@@ -276,12 +276,12 @@ def demo_api_test_tool(
         "recommendation": "Дополнительные инструменты не требуются.",
     }
 
-@tool
+@tool(response_format="content_and_artifact")
 def schemathesis_tool(
     contract_path: str,
     base_url: str,
     max_time: float | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Запустить контрактное тестирование API через микросервис Schemathesis.
 
@@ -302,11 +302,24 @@ def schemathesis_tool(
         max_time: Лимит времени прогона в секундах (опционально).
 
     Returns:
-        Словарь со сводкой прогона Schemathesis (status, scenarios,
-        failures, running_time и т.д.) либо status='error' при сбое
-        чтения контракта или обращения к сервису.
+        Компактное содержимое для LLM и полный artifact для отчёта/метрик.
+        Через tool.invoke без ToolCall возвращается компактный словарь.
     """
 
+    full = _run_legacy_schemathesis(contract_path, base_url, max_time)
+    from ..selection import _clip
+    compact = {key: _clip(full[key]) for key in (
+        "tool", "status", "service", "schema_title", "operations", "scenarios",
+        "running_time", "stop_reason", "nonfatal_errors", "message", "failures") if key in full}
+    compact["failures_total"] = len(full.get("failures", []))
+    compact["details_in_artifact"] = True
+    if len(json.dumps(compact, ensure_ascii=False)) > 6000:
+        compact.pop("failures", None)
+    return compact, full
+
+
+def _run_legacy_schemathesis(contract_path, base_url, max_time):
+    """Compatibility HTTP call; full facts stay outside the model content."""
     print()
     print("=" * 60)
     print("[TOOL] Вызван schemathesis_tool")
