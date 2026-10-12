@@ -1,4 +1,4 @@
-"""Real LLM test generation and limited self-repair (ТЗ 2.1.5, 2.1.2).
+"""Real LLM test generation and limited self-repair (TZ v3: 4.1.4, 4.1.7.1).
 
 The pipeline generates pytest modules from an API contract, runs them through
 the isolated pytest-runner, and repairs only errors that are attributable to

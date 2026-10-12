@@ -3,9 +3,8 @@
 No Docker, no network, no LLM credentials: the model replies are scripted and
 the runner reads the prepared attempt directories and returns scripted fits.
 
-All tests use a temporary contract that documents 404 for /catalogue/{id}, so
-a *documented* 404 observed by a test is repairable while an undocumented 500
-is a suspected service defect.
+Repair scenarios use an explicit missing fixture error. A failed API assertion
+alone, including a documented alternative status, is not repaired (TZ v3).
 """
 
 import json
@@ -48,13 +47,13 @@ GOOD_FILE = (
     "    assert response.status_code == 200\n"
 )
 BAD_FUNCTION = (
-    "def test_bad(base_url, api_client):\n"
-    "    response = api_client.get(f\"{base_url}/catalogue/999999\")\n"
+    "def test_bad(base_url, client):\n"
+    "    response = client.get(f\"{base_url}/catalogue/999999\")\n"
     "    assert response.status_code == 200\n"
 )
 FIXED_BAD = (
     "def test_bad(base_url, api_client):\n"
-    "    response = api_client.get(f\"{base_url}/catalogue/1\")\n"
+    "    response = api_client.get(f\"{base_url}/catalogue/999999\")\n"
     "    assert response.status_code == 200  # REPAIRED\n"
 )
 
@@ -94,10 +93,7 @@ def _failure_message_for(code: str) -> str | None:
         return "assert 2 == 1\nE   assert 2 == 1"
     if "assert 3 == 4" in code:
         return "assert 4 == 3\nE   assert 4 == 3"
-    return (
-        "assert 404 == 200\nE   assert response.status_code == 200\n"
-        "E   assert 404 == 200"
-    )
+    return "fixture 'client' not found"
 
 
 class ScriptedRunner:
@@ -129,11 +125,12 @@ class ScriptedRunner:
                     tests.append(RunnerTestResult("test_catalogue.py::test_bad", "passed"))
                 else:
                     tests.append(RunnerTestResult(
-                        "test_catalogue.py::test_bad", "failed", message=message,
+                        "test_catalogue.py::test_bad", "error" if "fixture '" in message else "failed",
+                        phase="setup" if "fixture '" in message else "call", message=message,
                     ))
         if not tests:
             return RunResult(RunStatus.NO_TESTS, 5, 0.5)
-        bad = any(test.outcome == "failed" for test in tests)
+        bad = any(test.outcome in {"failed", "error"} for test in tests)
         return RunResult(RunStatus.COMPLETED, 1 if bad else 0, 0.5, tests=tuple(tests))
 
 
@@ -317,12 +314,12 @@ def test_max_repair_attempts_bounds_the_loop(tmp_path):
     model = FakeModel()
     # Each repair changes the error signature, so the loop is not stuck early.
     model.repair_responses = [
-        BAD_FUNCTION.replace("999999", "111111"),
-        BAD_FUNCTION.replace("999999", "222222"),
+        FIXED_BAD,
+        FIXED_BAD,
     ]
     class VaryingRunner(ScriptedRunner):
         def __call__(self, config):
-            self.defect_message = f"attempt {len(self.configs)}: assert 404 == 200"
+            self.defect_message = f"attempt {len(self.configs)}: fixture 'client' not found"
             return super().__call__(config)
     runner = VaryingRunner()
     saver = FakeSaver()
@@ -337,10 +334,10 @@ def test_max_repair_attempts_bounds_the_loop(tmp_path):
 
 def test_token_budget_stops_the_loop(tmp_path):
     model = FakeModel()
-    model.repair_responses = [BAD_FUNCTION.replace("999999", "111111")]
+    model.repair_responses = [FIXED_BAD]
     class VaryingRunner(ScriptedRunner):
         def __call__(self, config):
-            self.defect_message = f"attempt {len(self.configs)}: assert 404 == 200"
+            self.defect_message = f"attempt {len(self.configs)}: fixture 'client' not found"
             return super().__call__(config)
     runner = VaryingRunner()
     saver = FakeSaver()

@@ -84,6 +84,7 @@ def _save_report(run: GenerationRun, settings: GenerationSettings) -> Generation
     except Exception as exc:  # report is auxiliary; the run result must survive
         return replace(
             run,
+            status="infrastructure_error",
             generator_errors=(
                 *run.generator_errors,
                 f"saving the generation report failed: {exc}",
@@ -130,15 +131,35 @@ def run_generation_pipeline(
     # for a failed generation so every report remains an immutable run record.
     run_dir = _run_dir(settings) / (
         datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex)
-    run_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+    except OSError as exc:
+        return GenerationRun("infrastructure_error", settings.contract_path, settings.model,
+                             0, 0, 0, 0, generator_errors=(f"creating run directory failed: {exc}",))
     settings = replace(settings, output_dir=run_dir)
+
+    def early_failure(message: str, status: str = "generation_error") -> GenerationRun:
+        return _save_report(GenerationRun(
+            status, settings.contract_path, settings.model, 0, 0, 0, 0,
+            generator_errors=(message,), runnability=compute_runnability((), None).to_dict()), settings)
+
+    # Validate input before constructing a provider client. An input failure
+    # never reaches generation/runner and still has a per-run report.
+    try:
+        contract = load_contract(settings.contract_path)
+    except (OSError, ValueError, UnicodeError) as exc:
+        return early_failure(f"loading contract failed: {exc}")
 
     # One model instance is shared by generation and every repair call, so a
     # caller can pass a model override or let the pipeline build the default.
     if model is None:
         from ..llm.model import build_model
 
-        model = build_model()
+        try:
+            model = build_model()
+        except (OSError, ValueError, RuntimeError) as exc:
+            from ..llm.diagnostics import describe_error
+            return early_failure(f"model initialization failed: {describe_error(exc)}")
 
     if run_tests_fn is None:
         # Service mode needs the runner network (and blocked networks) which
@@ -153,8 +174,10 @@ def run_generation_pipeline(
         run_tests_fn = run_tests_with_network
     save_fn = save_fn or default_save
 
-    contract = load_contract(settings.contract_path)
-    generated = generate_suite(contract, settings, model=model)
+    try:
+        generated = generate_suite(contract, settings, model=model)
+    except KeyboardInterrupt:
+        return early_failure("generation interrupted by caller", "interrupted")
     gen_input, gen_output, gen_total = generated["tokens"]
     generator_errors = list(generated["errors"])
     prepared: list[PreparedFile] = list(generated["prepared"])
@@ -183,8 +206,10 @@ def run_generation_pipeline(
     log: list[dict[str, Any]] = []
     defects: list[dict[str, Any]] = []
     environmental: list[dict[str, Any]] = []
+    artifact_failed = False
 
     def save_attempt(index: int, files: dict[str, str], extra: dict[str, Any] | None = None) -> None:
+        nonlocal artifact_failed
         try:
             generated_files = as_generated_files(
                 tuple(prepare_file(name, code) for name, code in files.items())
@@ -203,6 +228,7 @@ def run_generation_pipeline(
                 {"attempt": index, "run_id": saved.run_id, "tests_dir": str(saved.tests_dir)}
             )
         except Exception as exc:  # versioning must not kill the run
+            artifact_failed = True
             generator_errors.append(f"save attempt {index} failed: {exc}")
 
     save_attempt(0, files_map)
@@ -218,10 +244,15 @@ def run_generation_pipeline(
 
     while True:
         attempt_dir = run_dir / f"attempt-{attempt_index}"
-        tests_dir = write_attempt_dir(
-            tuple(prepare_file(name, code) for name, code in files_map.items()),
-            attempt_dir / "tests",
-        )
+        try:
+            tests_dir = write_attempt_dir(
+                tuple(prepare_file(name, code) for name, code in files_map.items()),
+                attempt_dir / "tests",
+            )
+        except OSError as exc:
+            status = "infrastructure_error"
+            generator_errors.append(f"preparing attempt {attempt_index} failed: {exc}")
+            break
         try:
             run = run_tests_fn(
                 RunConfig(
@@ -317,6 +348,10 @@ def run_generation_pipeline(
 
     expected = _expected_cases(files_map)
     run_result_dict = final_run.to_dict() if final_run is not None else None
+    if artifact_failed:
+        status = "infrastructure_error"
+    elif status == "success" and generated["errors"]:
+        status = "generation_error"
     return _save_report(
         GenerationRun(
             status=status,

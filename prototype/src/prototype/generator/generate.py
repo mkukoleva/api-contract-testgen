@@ -93,9 +93,10 @@ def generate_suite(
             ]
         )
     except Exception as exc:  # network/API failure is not a repaired code error
+        from ..llm.diagnostics import describe_error
         return {
             "prepared": (),
-            "errors": (f"LLM generation failed: {exc}",),
+            "errors": (f"LLM generation failed: {describe_error(exc)}",),
             "tokens": (0, 0, 0),
             "calls": 0,
         }
@@ -120,6 +121,10 @@ def generate_suite(
 
     errors: list[str] = []
     prepared: list[PreparedFile] = []
+    names = [spec.name for spec in output.files]
+    if len(names) != len(set(names)):
+        return {"prepared": (), "errors": ("duplicate generated file names; refusing to overwrite tests",),
+                "tokens": (input_tokens, output_tokens, total_tokens), "calls": 1}
     for spec in output.files:
         try:
             generated = GeneratedFile(spec.name, spec.code)

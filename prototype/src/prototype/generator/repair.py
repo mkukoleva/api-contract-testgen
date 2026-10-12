@@ -1,18 +1,17 @@
 """Limited self-repair: classify failures and repair only generated code.
 
-Boundaries (ADR 0004):
+Boundaries (TZ ARQA v3, 4.1.7.1 / ADR 0004):
 - Infrastructure failures (no Docker, unavailable API), timeouts and runs
   interrupted never produce an LLM repair call.
 - A test that fails because the observed response contradicts the documented
   contract is a suspected service defect: it is reported and NOT repaired, so
   an assertion is never weakened to make the test pass.
-- Collection errors request a file candidate; body failures request a function.
-  Application requires an unchanged AST except HTTP method / literal URL edits.
-  Broader changes, including syntax-invalid originals, require human review.
+- Collection/import errors request a file candidate; fixture errors a function.
+  Recoverable header syntax, known imports and fixture aliases are checked
+  against a trusted AST reference. API assertion failures alone are not repaired.
 """
 
 import ast
-import copy
 from dataclasses import dataclass
 import re
 from typing import Any, Literal
@@ -161,7 +160,7 @@ def extract_function_source(code: str, function_path: tuple[str, ...]) -> str | 
     return _source_slice(code, _decorator_start_line(node), node.end_lineno) or None
 
 
-def replace_function(code: str, function_path: tuple[str, ...], fixed: str) -> str:
+def replace_function(code: str, function_path: tuple[str, ...], fixed: str, *, target=None) -> str:
     """Replace one test function with the repaired source.
 
     Raises ValueError when the function cannot be located or the repaired
@@ -195,52 +194,17 @@ def replace_function(code: str, function_path: tuple[str, ...], fixed: str) -> s
         raise ValueError(
             f"repaired code lost the test function {'::'.join(function_path)}"
         )
-    _validate_repair(tree, new_tree)
+    if target is not None:
+        from .repair_safety import validate_repair
+        validate_repair(tree, new_tree, function_path=function_path, message=target.message)
+    else:
+        _validate_repair(tree, new_tree)
     return new_code
 
 
-class _RepairShape(ast.NodeTransformer):
-    """Allow literal HTTP URL/method fixes; preserve checks and control flow.
-
-    This deliberately declines broader rewrites (including schema assertions).
-    A prompt alone cannot enforce preservation of a test's meaning.
-    """
-
-    def visit_Assert(self, node):
-        return node  # A request embedded in an assertion is part of its oracle.
-
-    def visit_FunctionDef(self, node):
-        node.body = [self.visit(statement) for statement in node.body]
-        return node  # Do not normalize decorators, defaults or annotations.
-
-    visit_AsyncFunctionDef = visit_FunctionDef
-
-    def visit_Call(self, node):
-        self.generic_visit(node)
-        func = node.func
-        if (isinstance(func, ast.Attribute) and func.attr in _HTTP_VERBS and node.args
-                and isinstance(func.value, ast.Name) and func.value.id in {"api_client", "requests"}):
-            url = node.args[0]
-            # Interpolated variables must remain identical: only literal
-            # portions of a URL may change, not arbitrary executable expressions.
-            if isinstance(url, ast.Constant) and isinstance(url.value, str):
-                node.args[0] = ast.Constant(value="<url>")
-            elif isinstance(url, ast.JoinedStr):
-                for part in url.values:
-                    if isinstance(part, ast.Constant) and isinstance(part.value, str):
-                        part.value = "<url>"
-            func.attr = "<http-method>"
-        return node
-
-
 def _validate_repair(before: ast.Module, after: ast.Module) -> None:
-    # Conservative allowlist: only literal HTTP URL/method changes. Import
-    # rewrites can shadow assertion helpers too, so require review as well.
-    def shape(tree):
-        tree = copy.deepcopy(tree)
-        return ast.dump(_RepairShape().visit(tree), include_attributes=False)
-    if shape(before) != shape(after):
-        raise ValueError("repair requires review: checks or execution structure changed")
+    from .repair_safety import validate_repair
+    validate_repair(before, after)
 
 
 def _joined_pattern(node: ast.JoinedStr) -> str | None:
@@ -345,7 +309,7 @@ def classify_result(
 ) -> RepairPlan:
     """Turn one run result into a repair plan (targets + reported problems)."""
     if result.status == RunStatus.COLLECTION_ERROR:
-        return _classify_collection(result)
+        return _classify_collection(result, settings.base_url)
     if result.status != RunStatus.COMPLETED:
         return RepairPlan()
 
@@ -368,6 +332,12 @@ def classify_result(
             environmental.append({"nodeid": test.nodeid, "message": test.message})
             continue
 
+        if re.search(r"(?m)^\s*(?:E\s+)?(?:NameError|ModuleNotFoundError|ImportError):", test.message or ""):
+            targets.append(_as_repair_target(
+                kind="file", file=file_name, function_path=(), message=test.message,
+                reason="import", nodeid=test.nodeid))
+            continue
+
         if test.outcome == TestOutcome.ERROR:
             if is_environmental_failure(test.message, base_url):
                 environmental.append({"nodeid": test.nodeid, "message": test.message})
@@ -378,7 +348,7 @@ def classify_result(
                         file=file_name,
                         function_path=function_path,
                         message=test.message,
-                        reason="test_error",
+                        reason="fixture" if "not found" in (test.message or "") and "fixture " in (test.message or "") else "test_error",
                         nodeid=test.nodeid,
                     )
                 )
@@ -395,7 +365,7 @@ def classify_result(
                 )
             continue
 
-        # outcome == failed: an assertion did not hold.
+        # An API assertion failure does not establish a test-code defect.
         target_code = code
         if function_path:
             function_source = extract_function_source(code, function_path)
@@ -426,28 +396,8 @@ def classify_result(
                 }
             )
             continue
-        if not function_path:
-            targets.append(
-                _as_repair_target(
-                    kind="file",
-                    file=file_name,
-                    function_path=(),
-                    message=test.message,
-                    reason="assert_failed",
-                    nodeid=test.nodeid,
-                )
-            )
-        else:
-            targets.append(
-                _as_repair_target(
-                    kind="function",
-                    file=file_name,
-                    function_path=function_path,
-                    message=test.message,
-                    reason="assert_failed",
-                    nodeid=test.nodeid,
-                )
-            )
+        defects.append({"nodeid": test.nodeid, "message": test.message,
+                        "reason": "API check failed; no concrete test-code error established"})
 
     return RepairPlan(
         targets=tuple(targets),
@@ -456,20 +406,27 @@ def classify_result(
     )
 
 
-def _classify_collection(result: RunResult) -> RepairPlan:
+def _classify_collection(result: RunResult, base_url: str | None = None) -> RepairPlan:
     targets: list[RepairTarget] = []
+    environmental: list[dict[str, Any]] = []
     seen: set[str] = set()
     def add(file: str, message: str, reason: str) -> None:
+        file = file.replace("\\", "/").rsplit("/", 1)[-1]
         if not file.endswith(".py") or file in seen:
             return
         seen.add(file)
+        if is_environmental_failure(message, base_url):
+            environmental.append({"nodeid": file, "message": message})
+            return
         targets.append(_as_repair_target(kind="file", file=file, function_path=(),
                                          message=message, reason=reason))
     for message in result.collection_errors:
-        add(message.split(":", 1)[0].strip(), message, "collection")
+        match = re.search(r"(test_[a-z0-9_]+\.py)(?=[:\s]|$)", message)
+        if match:
+            add(match.group(1), message, "collection")
     for issue in result.compatibility_issues:
         add(issue.path.rsplit("/", 1)[-1], issue.message, issue.category.value)
-    return RepairPlan(targets=tuple(targets))
+    return RepairPlan(targets=tuple(targets), environmental=tuple(environmental))
 
 
 def _contract_fragment_for(contract: dict[str, Any], settings: Any, target: RepairTarget, code: str) -> str:
@@ -569,8 +526,9 @@ def repair_call(
             ]
         )
     except Exception as exc:
+        from ..llm.diagnostics import describe_error
         return RepairCallResult(
-            ok=False, payload_chars=len(prompt), error=f"LLM repair call failed: {exc}"
+            ok=False, payload_chars=len(prompt), error=f"LLM repair call failed: {describe_error(exc)}"
         )
 
     tokens = request_usage(message)
@@ -632,13 +590,16 @@ def apply_repair(files: dict[str, str], target: RepairTarget, fixed: str) -> dic
     """Return a new file map with the repair applied (never mutates input)."""
     updated = dict(files)
     if target.kind == "function" and target.function_path:
-        updated[target.file] = replace_function(updated[target.file], target.function_path, fixed)
+        updated[target.file] = replace_function(updated[target.file], target.function_path, fixed,
+                                                target=target)
     else:
         candidate = fixed.rstrip("\n") + "\n"
         try:
-            before, after = ast.parse(updated[target.file]), ast.parse(candidate)
+            from .repair_safety import syntax_reference, validate_repair
+            before = syntax_reference(updated[target.file])
+            after = ast.parse(candidate)
         except SyntaxError as exc:
             raise ValueError("repair requires review: cannot compare syntax-invalid source safely") from exc
-        _validate_repair(before, after)
+        validate_repair(before, after, function_path=target.function_path, message=target.message)
         updated[target.file] = candidate
     return updated

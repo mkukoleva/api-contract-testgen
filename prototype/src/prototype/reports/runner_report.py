@@ -9,7 +9,9 @@ from datetime import datetime
 import html
 import json
 from pathlib import Path
+import re
 import tempfile
+import xml.etree.ElementTree as ET
 
 from prototype.service_tools.runner.contracts import RunConfig, RunResult
 
@@ -95,19 +97,56 @@ def _atomic_write(path: Path, content: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _xml_text(value) -> str:
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]", "\ufffd", str(value))
+
+
+def _junit(result: dict) -> str:
+    """Export execution facts; a lifecycle error is a separate runner case.
+
+    These synthetic cases prevent CI treating timeout/empty collection as an
+    empty green suite. Quality metrics continue to use the original RunResult.
+    """
+    root = ET.Element("testsuites")
+    suite = ET.SubElement(root, "testsuite", name="isolated-pytest",
+                          time=f"{result['duration_seconds']:.6f}")
+    counts = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+    for test in result["tests"]:
+        prefix, _, name = test["nodeid"].rpartition("::")
+        case = ET.SubElement(suite, "testcase", name=_xml_text(name or test["nodeid"]),
+                             classname=_xml_text(prefix.replace("::", ".") or "pytest"),
+                             time=f"{test['duration_seconds']:.6f}")
+        counts["tests"] += 1
+        tag = {"failed": "failure", "error": "error", "skipped": "skipped"}.get(test["outcome"])
+        if tag:
+            counts[{"failure": "failures", "error": "errors", "skipped": "skipped"}[tag]] += 1
+            message = _xml_text(test["message"] or test["outcome"])
+            element = ET.SubElement(case, tag, message=message.splitlines()[0][:200], type=test["phase"])
+            element.text = message
+    if result["status"] != "completed" or not result["tests"]:
+        status = result["status"] if result["status"] != "completed" else "no_tests"
+        case = ET.SubElement(suite, "testcase", name=status, classname="runner", time="0")
+        error = ET.SubElement(case, "error", type=status, message=status)
+        error.text = _xml_text(result["error_message"] or "\n".join(result["collection_errors"]) or status)
+        counts["tests"] += 1
+        counts["errors"] += 1
+    suite.attrib.update({key: str(value) for key, value in counts.items()})
+    return '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode") + "\n"
+
+
 def save_run_report(
     result: RunResult, config: RunConfig, run_dir: Path, *,
     started_at: datetime, finished_at: datetime, input_files: list[str],
     image: str, network: str | None,
 ) -> RunResult:
-    """Write JSON + Markdown; return the same execution facts with report paths.
+    """Write JSON, Markdown and JUnit; preserve execution facts with report paths.
 
     The caller owns the unique run directory. I/O errors propagate so the
     runner cannot silently claim that required reports were saved.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
     paths = {**result.report_paths, "json": run_dir / "report.json",
-             "markdown": run_dir / "report.md"}
+             "markdown": run_dir / "report.md", "junit": run_dir / "junit.xml"}
     saved = replace(result, report_paths=paths)
     payload = {
         "schema_version": 1,
@@ -121,9 +160,10 @@ def save_run_report(
         "result": saved.to_dict(),
         "metrics": None,
     }
-    # Serialize both before writing; each destination is published atomically.
+    # Each destination is published atomically; the set is not a transaction.
     json_text = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     markdown = _markdown(payload)
+    _atomic_write(paths["junit"], _junit(payload["result"]))
     _atomic_write(paths["markdown"], markdown)
     _atomic_write(paths["json"], json_text)
     return saved

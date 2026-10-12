@@ -129,11 +129,12 @@ def test_apply_repair_rejects_weakened_or_bypassed_checks(body):
         apply_repair({"test_x.py": original}, target, f"def test_x(api_client):\n    {body}\n")
 
 
-def test_apply_repair_allows_url_fix_preserving_checks():
+def test_apply_repair_rejects_url_fix_without_concrete_code_error():
     original = "def test_x(api_client):\n    response = api_client.get('/old')\n    assert response.status_code == 200\n"
     target = RepairTarget(kind="function", file="test_x.py", function_path=("test_x",))
     fixed = original.replace("'/old'", "'/new'")
-    assert apply_repair({"test_x.py": original}, target, fixed)["test_x.py"] == fixed
+    with pytest.raises(ValueError, match="review"):
+        apply_repair({"test_x.py": original}, target, fixed)
 
 
 def test_whole_file_repair_cannot_remove_existing_checks():
@@ -198,8 +199,8 @@ def test_classify_marks_undocumented_status_as_suspected_defect():
     assert "not documented" in plan.suspected_defects[0]["reason"]
 
 
-def test_classify_repairs_documented_alternative_status():
-    # 404 IS documented for /catalogue/{id}: the test picked bad input.
+def test_documented_alternative_status_alone_does_not_authorize_repair():
+    # TZ v3: even a documented response does not establish a test-code bug.
     message = "assert 404 == 200\nE   assert response.status_code == 200\nE   assert 404 == 200"
     plan = classify_result(
         CONTRACT,
@@ -207,12 +208,8 @@ def test_classify_repairs_documented_alternative_status():
         _completed_with((RunnerTestResult("test_catalogue.py::test_item_by_id", "failed", message=message),)),
         settings(),
     )
-    assert len(plan.targets) == 1
-    target = plan.targets[0]
-    assert target.kind == "function"
-    assert target.file == "test_catalogue.py"
-    assert target.function_path == ("test_item_by_id",)
-    assert plan.suspected_defects == ()
+    assert plan.targets == ()
+    assert len(plan.suspected_defects) == 1
 
 
 def test_classify_without_request_site_is_conservative():
@@ -275,18 +272,18 @@ def test_apply_repair_function_and_file():
         {"test_catalogue.py": CODE},
         RepairTarget(kind="function", file="test_catalogue.py",
                      function_path=("test_item_by_id",)),
-        extract_function_source(CODE, ("test_item_by_id",)).replace("/catalogue/", "/items/"),
+        extract_function_source(CODE, ("test_item_by_id",)),
     )
     assert "def test_list" in updated["test_catalogue.py"]
-    assert "/items/{item_id}" in updated["test_catalogue.py"]
+    assert "/catalogue/{item_id}" in updated["test_catalogue.py"]
     assert "assert response.status_code == 200" in updated["test_catalogue.py"]
 
     updated_file = apply_repair(
         {"test_a.py": CODE},
         RepairTarget(kind="file", file="test_a.py"),
-        CODE.replace("/catalogue/", "/items/"),
+        "import pytest\n" + CODE,
     )
-    assert updated_file["test_a.py"] == CODE.replace("/catalogue/", "/items/")
+    assert updated_file["test_a.py"] == "import pytest\n" + CODE
     assert "test_a.py" in updated_file
 
 

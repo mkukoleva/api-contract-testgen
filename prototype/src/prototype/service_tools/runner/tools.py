@@ -6,7 +6,9 @@ generate_user_story_tool использует LLM для текстовых сц
 demo_api_test_tool и verify_user_story_tool остаются заглушками.
 save_tests_tool сохраняет код без импорта; generate_tests_tool вызывает
 отдельный конвейер генерации с изолированным pytest-runner.
-Последние два инструмента пока не зарегистрированы в build_agent.
+Последние два свободно параметризованных инструмента не зарегистрированы
+в build_agent. В режиме --generate используется create_generation_tool:
+адрес, сеть и лимиты фиксируются доверенным оркестратором, не аргументами LLM.
 """
 
 import json
@@ -467,6 +469,10 @@ def generate_tests_tool(
     """
     Сгенерировать pytest-тесты по OpenAPI-контракту и прогнать их.
 
+    Адаптер для доверенных Python-вызовов. Не регистрировать с этим набором
+    аргументов в агенте: вместо него использовать create_generation_tool,
+    фиксирующий сетевую политику и лимиты по п. 4.5.2.3 ТЗ v3.
+
     Инструмент запускает полный конвейер (ADR 0004): генерация тестов по
     контракту -> постобработка -> запуск через изолированный pytest-runner ->
     ограниченный self-repair (не более max_repair_attempts попыток и в рамках
@@ -528,6 +534,10 @@ def generate_tests_tool(
             "message": f"Не удалось запустить конвейер генерации: {exc}",
         }
 
+    return _generation_result(run)
+
+
+def _generation_result(run) -> dict[str, Any]:
     return {
         "tool": "generate_tests_tool",
         "status": "success" if run.status == "success" else run.status,
@@ -543,3 +553,43 @@ def generate_tests_tool(
         "generator_errors": list(run.generator_errors),
         "report_paths": run.report_paths,
     }
+
+
+def create_generation_tool(settings, *, model=None):
+    """Bind a generation tool to the trusted orchestrator's configuration.
+
+    TZ v3 4.5.2.3: no address, network, output path or limit is an LLM argument.
+    The legacy unbound adapter above is for trusted Python callers only and
+    must not be registered with an agent. M2 should register this bound tool.
+    """
+    from pydantic import BaseModel, ConfigDict
+    from ...generator.contracts import GenerationSettings
+    from ...generator.pipeline import run_generation_pipeline
+
+    if not isinstance(settings, GenerationSettings):
+        raise ValueError("settings must be validated GenerationSettings")
+
+    class TrustedInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    from langchain_core.tools import StructuredTool
+
+    class BoundTool(StructuredTool):
+        def _to_args_and_kwargs(self, tool_input, tool_call_id):
+            # LangChain skips validation of an empty argument schema. Enforce
+            # it here too, so extra policy arguments are rejected, not ignored.
+            if not isinstance(tool_input, dict) or tool_input:
+                raise ValueError("This tool accepts no configuration arguments")
+            return (), {}
+
+    def generate_bound_tests() -> dict[str, Any]:
+        """Generate and execute pytest tests using the configured isolated environment."""
+        try:
+            run = run_generation_pipeline(settings) if model is None else run_generation_pipeline(settings, model=model)
+            return _generation_result(run)
+        except (OSError, ValueError, RuntimeError) as exc:
+            from ...llm.diagnostics import describe_error
+            return {"tool": "generate_tests_tool", "status": "error",
+                    "message": f"Не удалось запустить конвейер генерации: {describe_error(exc)}"}
+
+    return BoundTool.from_function(generate_bound_tests, name="generate_tests_tool", args_schema=TrustedInput)
