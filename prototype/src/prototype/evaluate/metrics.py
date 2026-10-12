@@ -31,7 +31,7 @@ class GenerationMetrics:
 
     generation_time_seconds: float | None = None
 
-    contract_operations_total: int | None = None2.1.7
+    contract_operations_total: int | None = None
     contract_operations_covered: int | None = None
     contract_coverage_percent: float | None = None
 
