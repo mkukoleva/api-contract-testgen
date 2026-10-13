@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from ..service_tools.runner.contracts import RunResult, RunStatus, TestOutcome
 from .context import (
-    documented_status_codes,
+    match_response_definition,
     find_operation,
     operation_fragment,
     render_contract_for_generation,
@@ -383,9 +383,10 @@ def classify_result(
             )
             continue
         method, observed_path = request_site
-        documented = documented_status_codes(contract, method, observed_path)
+        found = find_operation(contract, method, observed_path)
+        responses = found[1].get("responses", {}) if found else {}
         actual = parse_actual_status(test.message)
-        if documented and actual is not None and actual not in documented:
+        if isinstance(responses, dict) and responses and actual is not None and match_response_definition(responses, actual) is None:
             defects.append(
                 {
                     "nodeid": test.nodeid,

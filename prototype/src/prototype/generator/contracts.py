@@ -11,8 +11,9 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 from ..parser.contract_input import ContractDocument, normalize_location
+from ..service_tools.runner.contracts import _validate_base_url
 
-# The team plan caps repair rounds at three (report_metrics.md: "≤3 attempts").
+# Default only: TZ v3 4.1.7.1 requires a configurable repair limit.
 DEFAULT_MAX_REPAIR_ATTEMPTS = 3
 ENV_MAX_REPAIR_ATTEMPTS = "TESTGEN_MAX_REPAIR_ATTEMPTS"
 
@@ -104,8 +105,8 @@ class GenerationSettings:
             object.__setattr__(self, "source_code_path", _str_path(self.source_code_path, "source_code_path"))
         if self.model is not None and not isinstance(self.model, str):
             raise ValueError("model must be a string or None")
-        if self.base_url is not None and not isinstance(self.base_url, str):
-            raise ValueError("base_url must be a string URL or None")
+        if self.base_url is not None:
+            _validate_base_url(self.base_url)
         if self.network is not None and not isinstance(self.network, str):
             raise ValueError("network must be a string network name or None")
         networks = tuple(self.blocked_networks)

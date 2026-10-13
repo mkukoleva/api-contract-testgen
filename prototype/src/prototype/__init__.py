@@ -181,12 +181,40 @@ def _append_metrics_to_report(
         file.write(metrics_markdown)
 
 
+def _report_input_error(exc, report_dir=None, *, inspect=False):
+    """Persist early failure without raw input/URLs, model calls or invented facts."""
+    import html
+    import sys
+    from .llm.diagnostics import describe_error
+    root = Path(report_dir) if report_dir is not None else (Path.cwd() / ".contract-runs" if inspect else REPORTS_DIR)
+    directory = root / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex)
+    payload = {"status": "input_error", "stage": "contract_input", "error": describe_error(exc)}
+    try:
+        directory.mkdir(parents=True, exist_ok=False)
+        text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        (directory / "input-error.json").write_text(text, encoding="utf-8")
+        (directory / "input-error.md").write_text(
+            "# Ошибка загрузки входных данных\n\n<pre>" + html.escape(text) + "</pre>\n", encoding="utf-8")
+        print(f"[CORE] Диагностика входных данных: {directory}", file=sys.stderr)
+    except (OSError, UnicodeError) as report_error:
+        print(f"[CORE] Не удалось сохранить отчёт об ошибке входа: {describe_error(report_error)}", file=sys.stderr)
+
+
+def _load_inputs(contract_path, source_code_path, report_dir, *, inspect=False):
+    from .parser.contract import ContractInputError, load_contract_document
+    from .parser.source_context import read_source_context
+    try:
+        document = load_contract_document(contract_path)
+        return document, read_source_context(source_code_path, document.data)
+    except (ContractInputError, OSError, UnicodeError) as exc:
+        _report_input_error(exc, report_dir, inspect=inspect)
+        raise
+
+
 def inspect_contract(contract_path: str, *, report_dir=None, source_code_path=None) -> None:
     """Validate input and persist its identity without creating an LLM client."""
-    from .parser.contract import load_contract_document, save_contract_snapshot
-    from .parser.source_context import read_source_context
-    document = load_contract_document(contract_path)
-    context = read_source_context(source_code_path, document.data)
+    from .parser.contract import save_contract_snapshot
+    document, context = _load_inputs(contract_path, source_code_path, report_dir, inspect=True)
     root = Path(report_dir) if report_dir is not None else Path.cwd() / ".contract-runs"
     directory = root / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex)
     identity = save_contract_snapshot(document, directory / "inputs")
@@ -218,17 +246,15 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
         format_metrics_markdown,
         save_metrics_report,
     )
-    from .parser.contract import load_contract_document, summarize_contract, save_contract_snapshot
-    from .parser.source_context import read_source_context
+    from .parser.contract import summarize_contract, save_contract_snapshot
     from .parser.contract_input import normalize_location
     from dataclasses import replace
 
     print("[CORE] Читаю API-контракт...")
 
-    document = load_contract_document(contract_path)
-    contract = summarize_contract(document.data, document.source)
     source_path = source_code_path if source_code_path is not None else getattr(generation_settings, "source_code_path", None)
-    source_context = read_source_context(source_path, document.data)
+    document, source_context = _load_inputs(contract_path, source_path, report_dir)
+    contract = summarize_contract(document.data, document.source)
     if generation_settings is not None:
         from .parser.contract import ContractInputError
         requested = normalize_location(contract_path)
@@ -356,11 +382,13 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
             except (ValueError, TypeError):
                 continue
             if isinstance(data, dict) and data.get("tool") == "generate_tests_tool":
-                generation_results.append(data)
+                if data not in generation_results:
+                    generation_results.append(data)
             elif isinstance(data, dict) and testing_settings is not None:
                 from .service_tools.selection import select_backend
                 if data.get("tool") == select_backend(testing_settings.intent) + "_tool":
-                    external_results.append(data)
+                    if data not in external_results:
+                        external_results.append(data)
         from .service_tools.runner.tools import _compact_generation_result
         from .service_tools.selection import compact_result
         print("[TOOLS] Фактические результаты инструмента (подробности в отчёте):")
@@ -445,8 +473,20 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
     # Restore full artifact content in a local copy only, after the LLM finished.
     metrics_input = dict(result)
     metrics_messages = []
+    seen_results = []
     for message in result.get("messages", []):
         artifact = getattr(message, "artifact", None)
+        if message.__class__.__name__ == "ToolMessage":
+            try:
+                facts = artifact if isinstance(artifact, dict) else json.loads(message.content)
+            except (ValueError, TypeError):
+                facts = None
+            if isinstance(facts, dict) and facts in [*generation_results, *external_results]:
+                # A cached tool replay is one execution. Keep every agent
+                # message (and its usage), but give evaluate the result once.
+                if facts in seen_results:
+                    continue
+                seen_results.append(facts)
         if isinstance(artifact, dict) and hasattr(message, "model_copy"):
             message = message.model_copy(update={"content": json.dumps(artifact, ensure_ascii=False)})
         metrics_messages.append(message)
@@ -546,6 +586,7 @@ def main() -> None:
 
     generation_settings = None
     testing_settings = None
+    from .parser.contract import ContractInputError
     if args.test_intent:
         from .service_tools.selection import ToolSettings
         try:
@@ -555,6 +596,8 @@ def main() -> None:
                 microcks_service_id=args.microcks_service_id, microcks_runner=args.microcks_runner or "OPEN_API_SCHEMA",
                 evomaster_image=args.evomaster_image or "webfuzzing/evomaster:v6.1.1")
         except ValueError as exc:
+            if isinstance(exc, ContractInputError):
+                _report_input_error(exc, args.report_dir)
             parser.error(str(exc))
         if any(value is not None for value in (args.runner_timeout, args.max_repair_attempts,
             args.repair_token_budget, args.tests_output_dir)) or args.blocked_network:
@@ -578,6 +621,8 @@ def main() -> None:
                 output_root=args.tests_output_dir, runner_timeout_seconds=timeout,
                 source_code_path=args.source_code, **overrides)
         except ValueError as exc:
+            if isinstance(exc, ContractInputError):
+                _report_input_error(exc, args.report_dir)
             parser.error(str(exc))
     elif any(value is not None for value in (args.base_url, args.network, args.runner_timeout,
              args.max_repair_attempts, args.repair_token_budget, args.tests_output_dir)) or args.blocked_network:
@@ -607,7 +652,8 @@ def main() -> None:
             if code:
                 raise SystemExit(code)
     except (ContractInputError, OSError, UnicodeError) as exc:
-        parser.error(str(exc))
+        from .llm.diagnostics import describe_error
+        parser.error(describe_error(exc))
 
 
 if __name__ == "__main__":

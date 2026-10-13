@@ -160,7 +160,10 @@ def normalize_contract(data: dict[str, Any]) -> dict[str, Any]:
                         raise ValueError("invalid JSON pointer array index")
                     value = value[int(token)]
                 else:
-                    value = value[token]
+                    # YAML permits unquoted integer response codes. Their
+                    # canonical string representation is used in JSON pointers.
+                    key = int(token) if token not in value and re.fullmatch(r"-?(?:0|[1-9][0-9]*)", token) else token
+                    value = value[key]
         except (KeyError, IndexError, ValueError, TypeError) as exc:
             raise ContractInputError(f"Не удалось разрешить $ref: {ref}") from exc
         return value
@@ -183,6 +186,15 @@ def normalize_contract(data: dict[str, Any]) -> dict[str, Any]:
             if value is not None and not isinstance(value, (str, int, float, bool)):
                 raise ContractInputError("Значения YAML контракта должны быть совместимы с JSON.")
             return value
+        normalized_keys = {}
+        for key, item in value.items():
+            if not isinstance(key, str) and type(key) is not int:
+                raise ContractInputError("Ключи объектов YAML должны быть строками или целыми числами.")
+            key = str(key)
+            if key in normalized_keys:
+                raise ContractInputError("Ключи объекта YAML совпадают после преобразования в строки.")
+            normalized_keys[key] = item
+        value = normalized_keys
         def child(key, item):
             # Example/default/enum values are API data, not Reference Objects.
             is_literal = literal or (not mapping and (key in {"example", "default", "enum", "const", "value"}
