@@ -110,11 +110,13 @@ def run_evomaster(settings):
 
 
 def run_microcks(settings, *, request_fn=None, sleep_fn=time.sleep):
+    from requests.exceptions import Timeout as RequestTimeout
     started = time.monotonic()
     deadline = started + settings.timeout_seconds
     session = _session() if request_fn is None else None
     token = os.getenv("MICROCKS_TOKEN")
     headers = {"Authorization": "Bearer " + token} if token else {}
+    result = None
     def call(method, path, **kwargs):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -171,8 +173,13 @@ def run_microcks(settings, *, request_fn=None, sleep_fn=time.sleep):
             "summary": {"cases": len(cases), "steps": steps, "passed": sum(c.get("success") is True for c in cases),
                         "failed": sum(c.get("success") is False for c in cases)}, "failures": failures,
             "duration_seconds": time.monotonic() - started, "raw": result}
-    except TimeoutError:
-        return {"backend": "microcks", "status": "timeout", "duration_seconds": time.monotonic() - started}
+    except (TimeoutError, RequestTimeout):
+        payload = {"backend": "microcks", "status": "timeout", "duration_seconds": time.monotonic() - started}
+        if isinstance(result, dict):
+            # Preserve the last response (including remote run id); it is
+            # partial evidence, not a completed verdict or invented counts.
+            payload.update(partial=True, raw=result)
+        return payload
     finally:
         if session:
             session.close()

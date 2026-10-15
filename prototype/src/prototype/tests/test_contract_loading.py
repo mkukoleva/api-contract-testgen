@@ -287,7 +287,23 @@ def test_inspect_errors_exit_two_before_agent(tmp_path, monkeypatch, capsys):
         prototype.main()
     assert error.value.code == 2
     assert "объект JSON/YAML" in capsys.readouterr().err
-    assert not (tmp_path / "reports").exists()
+    assert len(list((tmp_path / "reports").rglob("input-error.json"))) == 1
+
+
+@pytest.mark.parametrize("endpoint", ["/missing", "/bad", "/loop", "/large", "/slow"])
+def test_http_input_errors_leave_cli_diagnostics(schema_server, tmp_path, monkeypatch, endpoint):
+    import prototype
+    from prototype.parser import contract as parser_module
+    url, _, _ = schema_server
+    monkeypatch.setattr(parser_module, "CONTRACT_DOWNLOAD_TIMEOUT", .05 if endpoint == "/slow" else 2)
+    monkeypatch.setattr("sys.argv", ["tester", url + endpoint, "--inspect-contract", "--report-dir", str(tmp_path)])
+    monkeypatch.setattr(prototype, "build_agent", lambda **kw: pytest.fail("Failed download must not reach LLM"))
+    with pytest.raises(SystemExit) as error:
+        prototype.main()
+    assert error.value.code == 2
+    report = json.loads(next(tmp_path.rglob("input-error.json")).read_text(encoding="utf-8"))
+    assert report["status"] == "input_error" and report["error"]
+    assert not list(tmp_path.rglob("contract-report.json"))
 
 
 def test_missing_source_is_an_input_error_before_model_call(tmp_path):

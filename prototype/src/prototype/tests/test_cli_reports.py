@@ -57,7 +57,7 @@ def test_cli_invalid_contract_exits_without_calling_agent(tmp_path, monkeypatch,
     error = capsys.readouterr().err
     assert "error:" in error
     assert "Traceback" not in error
-    assert not (tmp_path / "reports").exists()
+    assert len(list((tmp_path / "reports").rglob("input-error.json"))) == 1
 
 
 def test_cli_report_dir_keeps_results_outside_default_directory(tmp_path, monkeypatch):

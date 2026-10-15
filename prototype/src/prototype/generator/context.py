@@ -24,25 +24,43 @@ def load_contract(path: Path | str) -> dict[str, Any]:
 def match_contract_path(contract_path: str, observed: str) -> bool:
     """Match an observed request path against a contract template path.
 
-    Contract segments in curly braces match any single concrete segment;
-    other segments must be equal. An absolute observed URL is normalised to
-    its path first.
+    Each template expression matches a nonempty part of one path segment.
+    Static text is literal; an absolute observed URL is reduced to its path.
     """
     observed = _to_path(observed)
-    contract_parts = contract_path.strip("/").split("/")
-    observed_parts = observed.strip("/").split("/")
-    if contract_parts == [""]:
-        contract_parts = []
-    if observed_parts == [""]:
-        observed_parts = []
-    if len(contract_parts) != len(observed_parts):
+    templates = contract_path.strip("/").split("/")
+    segments = observed.strip("/").split("/")
+    if len(templates) != len(segments):
         return False
-    for template, concrete in zip(contract_parts, observed_parts):
-        if template.startswith("{") and template.endswith("}"):
-            continue
-        if template != concrete:
+    for template, segment in zip(templates, segments):
+        positions = {0}
+        parts = re.split(r"(\{[^{}\/]+\})", template)
+        for index, part in enumerate(parts):
+            if index % 2:
+                # Any reachable prefix may grow by >=1 character. Track
+                # positions instead of backtracking over parameter splits.
+                positions = set(range(min(positions) + 1, len(segment) + 1))
+            else:
+                positions = {position + len(part) for position in positions
+                             if segment.startswith(part, position)}
+            if not positions:
+                return False
+        if len(segment) not in positions:
             return False
     return True
+
+
+def match_response_definition(responses, status_code: int) -> str | None:
+    """Select one OpenAPI response: explicit code, range, then default.
+
+    Return a canonical uppercase key for report comparison. Extensions and
+    invalid response keys do not document an HTTP status.
+    """
+    if type(status_code) is not int or not 100 <= status_code <= 599:
+        return None
+    codes = {str(key).upper() for key in responses}
+    exact, wildcard = str(status_code), str(status_code)[0] + "XX"
+    return next((key for key in (exact, wildcard, "DEFAULT") if key in codes), None)
 
 
 def _to_path(text: str) -> str:

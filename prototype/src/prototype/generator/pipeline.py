@@ -54,7 +54,11 @@ def _derive_status(run: RunResult) -> str:
     bad = any(
         test.outcome in (TestOutcome.FAILED, TestOutcome.ERROR) for test in run.tests
     )
-    return "completed_with_failures" if bad else "success"
+    if bad or run.exit_code != 0:
+        return "completed_with_failures"
+    if not any(test.outcome == TestOutcome.PASSED for test in run.tests):
+        return "completed_without_execution"
+    return "success"
 
 
 def _run_dir(settings: GenerationSettings) -> Path:

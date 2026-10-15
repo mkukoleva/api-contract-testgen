@@ -7,7 +7,7 @@ def build_recommendations(contract, run=None, *, suspected_defects=(), environme
                           scope="Ответы доверенного api_client; другие клиенты не отслеживаются. Это рекомендации, не расчёт метрик."):
     # generator.__init__ exports pipeline, which imports this report module.
     # Defer the matching helper until both modules have finished importing.
-    from ..generator.context import match_contract_path
+    from ..generator.context import match_contract_path, match_response_definition
     operations = {}
     for path, item in contract.get("paths", {}).items():
         if not path.startswith("/") or not isinstance(item, dict):
@@ -46,9 +46,8 @@ def build_recommendations(contract, run=None, *, suspected_defects=(), environme
             continue
         observed_operations.add(key)
         codes = operations[key]
-        matched = {code for code in codes if code == status or code == status[0] + "XX"}
-        if not matched and "DEFAULT" in codes:
-            matched = {"DEFAULT"}
+        definition = match_response_definition(codes, observation["status_code"])
+        matched = {definition} if definition is not None else set()
         observed_codes.update((key, code) for code in matched)
         if not matched:
             items.append({"kind": "contract_clarification", "operation": f"{key[0]} {key[1]}",

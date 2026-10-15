@@ -621,8 +621,7 @@ def create_generation_tool(settings, *, model=None):
                 raise ValueError("This tool accepts no configuration arguments")
             return (), {}
 
-    def generate_bound_tests():
-        """Generate and execute pytest tests using the configured isolated environment."""
+    def execute_generation():
         try:
             run = run_generation_pipeline(settings) if model is None else run_generation_pipeline(settings, model=model)
             full = _generation_result(run)
@@ -634,6 +633,17 @@ def create_generation_tool(settings, *, model=None):
             full = {"tool": "generate_tests_tool", "status": "error",
                     "message": f"Не удалось запустить конвейер генерации: {describe_error(exc)}"}
             return full, full
+
+    from threading import Lock
+    lock = Lock()
+    cached = []
+
+    def generate_bound_tests():
+        """Generate once; repeated agent calls replay this run, including failures."""
+        with lock:
+            if not cached:
+                cached.append(execute_generation())
+            return cached[0]
 
     return BoundTool.from_function(generate_bound_tests, name="generate_tests_tool", args_schema=TrustedInput,
                                    response_format="content_and_artifact")
