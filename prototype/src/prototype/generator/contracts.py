@@ -97,6 +97,11 @@ class GenerationSettings:
     test_fragment_lines: int = DEFAULT_TEST_FRAGMENT_LINES
     contract_fragment_chars: int = DEFAULT_CONTRACT_FRAGMENT_CHARS
     diagnostic_chars: int = DEFAULT_DIAGNOSTIC_CHARS
+    # Whole-contract summary budget for the generation prompt (TZ v3 4.1.2.2).
+    # Character-based enforcement unit: 8000 chars ≈ 2-2.5k tokens for this
+    # mostly-Cyrillic rendering; the actual prompt tokens are measured from
+    # the provider usage and recorded on the run.
+    summary_max_chars: int = 8000
     source_code_path: Path | str | None = None
     # Optional context enrichment with a deterministic Schemathesis run
     # (TZ v3 4.1.2.3). The digest is diagnostic context only: the contract
@@ -162,6 +167,9 @@ class GenerationSettings:
         )
         object.__setattr__(
             self, "diagnostic_chars", _non_negative_int(self.diagnostic_chars, "diagnostic_chars")
+        )
+        object.__setattr__(
+            self, "summary_max_chars", _non_negative_int(self.summary_max_chars, "summary_max_chars")
         )
         if not isinstance(self.enrich_with_schemathesis, bool):
             raise ValueError("enrich_with_schemathesis must be a bool")

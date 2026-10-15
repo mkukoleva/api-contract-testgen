@@ -290,6 +290,99 @@ def test_openapi_31_false_schema_is_preserved_in_context():
     assert "application/json:false" in render_contract_for_generation(contract)
 
 
+def test_openapi_31_discriminator_is_preserved_in_context():
+    contract = {"openapi": "3.1.0", "info": {}, "paths": {"/pets": {"get": {
+        "responses": {"200": {"content": {"application/json": {"schema": {
+            "oneOf": [{"type": "object", "properties": {"meows": {"type": "boolean"}}},
+                      {"type": "object", "properties": {"barks": {"type": "boolean"}}}],
+            "discriminator": {"propertyName": "petType"}}}}}}}}}}
+    text = render_contract_for_generation(contract)
+    assert 'discriminator={"propertyName":"petType"}' in text
+
+
+def test_summary_operation_description_covers_all_tz_4_1_2_4_elements():
+    """Checklist for TZ v3 4.1.2.4: one fixture exercises every required element
+    of the operation description in the summary; one assertion group per element."""
+    contract = {
+        "openapi": "3.1.0",
+        "info": {"title": "Things", "version": "1"},
+        "paths": {
+            "/things": {
+                "post": {
+                    "operationId": "createThing",
+                    "parameters": [
+                        {"name": "trace", "in": "header", "required": False,
+                         "schema": {"type": "string", "pattern": "^t-[0-9]+$"}},
+                    ],
+                    "requestBody": {"required": True, "content": {"application/json": {
+                        "schema": {"type": "object", "required": ["name"], "properties": {
+                            "name": {"type": "string", "minLength": 1, "maxLength": 50,
+                                      "enum": ["chair", "desk"], "example": "chair"},
+                            "qty": {"type": "integer", "format": "int32",
+                                     "minimum": 1, "maximum": 10}}},
+                        "example": {"name": "chair", "qty": 2}}}},
+                    "responses": {
+                        "201": {"description": "Created", "content": {"application/json": {
+                            "schema": {"$ref": "#/components/schemas/Thing"}}}},
+                        "400": {"description": "Bad request"},
+                        "default": {"description": "Other"},
+                    },
+                },
+            },
+            "/things/{id}": {
+                "get": {
+                    "operationId": "getThing",
+                    "parameters": [
+                        {"name": "id", "in": "path", "required": True,
+                         "schema": {"type": "string", "format": "uuid"}},
+                        {"name": "verbose", "in": "query", "required": False,
+                         "schema": {"type": "boolean"}},
+                    ],
+                    "responses": {
+                        "200": {"description": "OK", "content": {"application/json": {
+                            "schema": {"$ref": "#/components/schemas/Thing"},
+                            "example": {"id": "00000000-0000-0000-0000-000000000000",
+                                        "name": "chair"}}}},
+                    },
+                },
+            },
+        },
+        "components": {"schemas": {"Thing": {
+            "type": "object", "required": ["id", "name"],
+            "properties": {"id": {"type": "string", "format": "uuid"},
+                           "name": {"type": "string"}}}}},
+    }
+    text = render_contract_for_generation(contract)
+    # 1. Method and path.
+    assert "POST /things" in text
+    assert "GET /things/{id}" in text
+    # 2. Parameters (path, query, header) with types and formats.
+    assert "id (path, required) string (format=\"uuid\")" in text
+    assert "verbose (query, optional) boolean" in text
+    assert "trace (header, optional) string (pattern=" in text
+    # 3. Constraints: min/max, pattern, enum.
+    assert "minimum=1" in text and "maximum=10" in text
+    assert "minLength=1" in text and "maxLength=50" in text
+    assert 'enum=["chair","desk"]' in text
+    assert "format=\"int32\"" in text
+    # 4. Required request body fields.
+    assert "requestBody (required):" in text
+    assert "name*:" in text
+    # 5. Documented response codes and response schemas.
+    assert "POST /things -> 201 400 default" in text
+    assert "id*:string (format=\"uuid\")" in text
+    # 6. Examples.
+    assert "example=" in text
+    assert '"name":"chair"' in text
+    assert "00000000-0000-0000-0000-000000000000" in text
+    # 7. Inter-operation links (identifier created by one, used by another).
+    assert "Связи между операциями" in text
+    assert "- POST /things (creates id) -> GET /things/{id} (uses path: id) [inferred]" in text
+    # The per-operation description also carries the dependency lines.
+    get_fragment = operation_fragment(contract, "GET", "/things/1")
+    assert "depends on: POST /things (id — 201) [inferred]" in get_fragment
+
+
 ITEMS_CONTRACT = {
     "openapi": "3.1.0",
     "info": {"title": "Items", "version": "1"},

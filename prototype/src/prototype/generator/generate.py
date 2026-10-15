@@ -88,7 +88,8 @@ def generate_suite(
 
     llm = model if model is not None else build_model()
     try:
-        contract_fragment = render_contract_for_generation(contract)
+        contract_fragment = render_contract_for_generation(contract,
+                                                           max_chars=settings.summary_max_chars)
     except ValueError as exc:
         return {"prepared": (), "errors": (f"invalid generation context: {exc}",),
                 "tokens": (0, 0, 0), "calls": 0}

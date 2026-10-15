@@ -167,7 +167,7 @@ def _brief_schema(schema: dict[str, Any], depth: int = 0) -> str:
     for key in ("$ref", "format", "required", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
                 "multipleOf", "minLength", "maxLength", "pattern", "minItems", "maxItems", "uniqueItems",
                 "minProperties", "maxProperties", "enum", "const", "nullable", "default", "example", "examples",
-                "readOnly", "writeOnly", "additionalProperties"):
+                "readOnly", "writeOnly", "additionalProperties", "discriminator"):
         if key in schema:
             extras.append(f"{key}={json.dumps(schema[key], ensure_ascii=False, separators=(',', ':'))}")
     for key in ("oneOf", "anyOf", "allOf"):

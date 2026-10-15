@@ -229,6 +229,29 @@ def test_generate_suite_forwards_schemathesis_context():
     assert "Сводка Schemathesis" not in bare.prompts[0][1]
 
 
+def test_generate_suite_forwards_source_context():
+    """TZ v3 4.1.2.3: source code fragments enrich the generation prompt."""
+    contract = {"openapi": "3.0.3", "info": {"title": "T", "version": "1"},
+                "paths": {"/catalogue": {"get": {"responses": {"200": {
+                    "description": "OK"}}}}}}
+    settings = GenerationSettings(
+        contract_path="unused",
+        source_context={"text": "# src/catalogue.py:1\ndef get_catalogue():\n    pass",
+                        "metadata": {"provided": True}})
+    model = FakeModel()
+    result = generate_suite(contract, settings, model=model)
+    assert result["calls"] == 1
+    user = model.prompts[0][1]
+    assert "Дополнительный статический контекст Python/FastAPI" in user
+    assert "def get_catalogue():" in user
+    # Metadata never enters the prompt, only the bounded text.
+    assert '"provided": true' not in user
+
+    bare = FakeModel()
+    generate_suite(contract, GenerationSettings(contract_path="unused"), model=bare)
+    assert "Дополнительный статический контекст" not in bare.prompts[0][1]
+
+
 def test_schemathesis_digest_bounded_and_deduplicated():
     failures = [{"operation": f"GET /op/{index}", "check": "check", "title": f"title-{index}"}
                 for index in range(12)]
@@ -276,3 +299,34 @@ def test_schemathesis_settings_validation():
     assert defaults.enrich_with_schemathesis is True
     assert defaults.schemathesis_service_url is None
     assert defaults.schemathesis_timeout_seconds == 60.0
+
+
+def test_summary_max_chars_settings_validation():
+    with pytest.raises(ValueError, match="summary_max_chars"):
+        GenerationSettings(contract_path="unused", summary_max_chars=-1)
+    with pytest.raises(ValueError, match="summary_max_chars"):
+        GenerationSettings(contract_path="unused", summary_max_chars="8000")
+    assert GenerationSettings(contract_path="unused").summary_max_chars == 8000
+
+
+def test_summary_max_chars_setting_bounds_the_generation_prompt():
+    """TZ v3 4.1.2.2: a smaller budget yields a smaller prompt; the operation
+    list is never silently dropped."""
+    contract = {"info": {}, "paths": {
+        f"/items/{n}": {"get": {
+            "responses": {"200": {"description": "d" * 200,
+                                  "content": {"application/json": {"schema": {
+                                      "type": "object", "required": ["f"],
+                                      "properties": {"f": {"type": "string"}}}}}}}}}
+        for n in range(20)}}
+    default_model = FakeModel()
+    generate_suite(contract, GenerationSettings(contract_path="unused"),
+                   model=default_model)
+    small_model = FakeModel()
+    generate_suite(contract,
+                   GenerationSettings(contract_path="unused", summary_max_chars=1500),
+                   model=small_model)
+    assert len(small_model.prompts[0][1]) < len(default_model.prompts[0][1])
+    assert "обрезано" in small_model.prompts[0][1]
+    for n in range(20):
+        assert f"GET /items/{n}" in small_model.prompts[0][1]
