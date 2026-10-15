@@ -70,6 +70,12 @@ def schema_server(request):
                 spec = SPEC | {"paths": {"/items": {"get": {"responses": {"200": {
                     "$ref": f"http://127.0.0.1:{self.server.server_port}/external"}}}}}}
                 payload = json.dumps(spec).encode()
+            if self.path == "/external":
+                payload = json.dumps({"description": "External OK", "content": {
+                    "application/json": {"schema": {"type": "object",
+                                                     "required": ["external"],
+                                                     "properties": {
+                                                         "external": {"type": "string"}}}}}}).encode()
             self.send_response(status)
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
@@ -189,11 +195,12 @@ def test_bounded_download_reports_redirect_size_and_timeout_failures(schema_serv
     assert len(requests) <= 5
 
 
-def test_url_yaml_and_swagger_are_supported_and_no_external_ref_is_fetched(schema_server):
+def test_url_yaml_and_swagger_are_supported_and_external_ref_is_resolved(schema_server):
     url, requests, _ = schema_server
     assert read_contract_summary(url + "/yaml")["specification"] == "Swagger 2.0"
     assert read_contract_summary(url + "/ref")["operations"] == ["GET /items"]
-    assert requests == ["/yaml", "/ref"]
+    # The external $ref is fetched once at load time through the bounded path.
+    assert requests == ["/yaml", "/ref", "/external"]
 
 
 def test_source_directory_context_contains_router_models_and_helpers_not_venv_or_side_effects(tmp_path):

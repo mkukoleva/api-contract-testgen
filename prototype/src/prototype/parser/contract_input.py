@@ -40,3 +40,5 @@ class ContractDocument:
     raw: bytes
     data: dict[str, Any]
     resolved_url: str | None = None
+    # Resolved URLs of external $ref documents fetched at load time, in order.
+    external_refs: tuple[str, ...] = ()

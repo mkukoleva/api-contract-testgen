@@ -210,8 +210,14 @@ def test_swagger_schema_body_and_response_are_in_generation_context():
 
 
 def test_recursive_and_external_refs_are_explicit_and_never_fetched(monkeypatch):
-    import urllib.request
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("No network while summarizing"))
+    """Render/summarize paths are pure: external refs stay explicit markers.
+
+    Fetching happens once at load time (test_external_refs); a contract dict
+    that bypasses the loader must never trigger a download here.
+    """
+    from prototype.parser import contract as contract_module
+    monkeypatch.setattr(contract_module, "_download_contract_bytes",
+                        lambda *a, **k: pytest.fail("No network while summarizing"))
     contract = {"info": {}, "paths": {"/nodes": {"get": {"responses": {"200": {"content": {
         "application/json": {"schema": {"$ref": "#/components/schemas/Node"}}}},
         "400": {"$ref": "https://example.invalid/errors.yaml#/Bad"}}}}},
