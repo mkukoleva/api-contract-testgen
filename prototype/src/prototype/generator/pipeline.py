@@ -63,6 +63,68 @@ def _run_dir(settings: GenerationSettings) -> Path:
     return Path.cwd() / ".pipeline-runs"
 
 
+def _default_schemathesis_fetch(contract_path, base_url, service_url, timeout_seconds):
+    """One bounded Schemathesis run through the documented HTTP microservice."""
+    from ..service_tools.backends import run_schemathesis
+    from ..service_tools.selection import ToolSettings
+    return run_schemathesis(ToolSettings(
+        contract_path=contract_path,
+        base_url=base_url,
+        intent="quick",
+        timeout_seconds=timeout_seconds,
+        schemathesis_url=service_url,
+    ))
+
+
+def _prepare_schemathesis_context(settings, run_dir, provenance, *, fetch_fn=None) -> str:
+    """Optional context enrichment with a deterministic Schemathesis run.
+
+    Any failure (service down, timeout, invalid result) is recorded in
+    provenance and never aborts generation: the contract remains the only
+    source of expected values. Returns the compact digest for the prompt or
+    "" when the context is unavailable.
+    """
+    if not settings.enrich_with_schemathesis:
+        provenance["schemathesis"] = {"status": "skipped", "reason": "enrichment disabled"}
+        return ""
+    if not settings.base_url:
+        provenance["schemathesis"] = {"status": "skipped", "reason": "no base_url (unit mode)"}
+        return ""
+    service_url = (
+        settings.schemathesis_service_url
+        or os.getenv("SCHEMATHESIS_SERVICE_URL", "").strip()
+        or "http://127.0.0.1:8080"
+    ).rstrip("/")
+    try:
+        result = (fetch_fn or _default_schemathesis_fetch)(
+            settings.contract_path, settings.base_url, service_url,
+            settings.schemathesis_timeout_seconds)
+    except Exception as exc:
+        provenance["schemathesis"] = {
+            "status": "unavailable", "service_url": service_url, "reason": str(exc)[:300]}
+        return ""
+    if not isinstance(result, dict) or result.get("status") not in {"completed", "no_tests"}:
+        provenance["schemathesis"] = {"status": "invalid_result", "service_url": service_url}
+        return ""
+    counts = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    failures = result.get("failures") if isinstance(result.get("failures"), list) else []
+    provenance["schemathesis"] = {
+        "status": result["status"],
+        "service_url": service_url,
+        "scenarios": {key: counts[key] for key in ("total", "passed", "failed", "errors", "skipped")
+                      if isinstance(counts.get(key), int) and not isinstance(counts.get(key), bool)},
+        "failures_total": len(failures),
+        "duration_seconds": result.get("duration_seconds"),
+    }
+    try:
+        (run_dir / "inputs" / "schemathesis-summary.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except (OSError, TypeError, ValueError):
+        pass  # the artifact is auxiliary; provenance already records the run
+    from .context import schemathesis_digest
+    return schemathesis_digest(result)
+
+
 def _expected_cases(files_map: dict[str, str]) -> tuple[str, ...]:
     """Static pytest nodeids of the current suite (runnability denominator).
 
@@ -122,11 +184,13 @@ def run_generation_pipeline(
     model: Any = None,
     run_tests_fn: Callable[[RunConfig], RunResult] | None = None,
     save_fn: Callable[..., Any] | None = None,
+    schemathesis_fn: Callable[[Any, str, str, float], dict] | None = None,
 ) -> GenerationRun:
     """Run the full pipeline and return a structured GenerationRun.
 
-    ``run_tests_fn`` and ``save_fn`` default to the isolated Docker runner and
-    prototype.storage; tests inject fakes for both.
+    ``run_tests_fn``, ``save_fn`` and ``schemathesis_fn`` default to the
+    isolated Docker runner, prototype.storage and the Schemathesis
+    microservice; tests inject fakes for all three.
     """
     from ..service_tools.runner.docker_runner import DEFAULT_IMAGE, run_tests as default_run_tests
     from ..storage import SaveRequest, save_test_suite as default_save
@@ -175,6 +239,12 @@ def run_generation_pipeline(
     except (OSError, ValueError, UnicodeError) as exc:
         return early_failure(f"loading contract failed: {exc}")
 
+    # Optional deterministic-tool enrichment (TZ v3 4.1.2.3): a bounded
+    # Schemathesis run of the live service. A failure here never aborts the
+    # pipeline; the contract stays the only source of expected values.
+    schemathesis_context = _prepare_schemathesis_context(
+        settings, run_dir, provenance, fetch_fn=schemathesis_fn)
+
     # One model instance is shared by generation and every repair call, so a
     # caller can pass a model override or let the pipeline build the default.
     if model is None:
@@ -203,7 +273,8 @@ def run_generation_pipeline(
     save_fn = save_fn or default_save
 
     try:
-        generated = generate_suite(contract, settings, model=model)
+        generated = generate_suite(contract, settings, model=model,
+                                   schemathesis_context=schemathesis_context)
     except KeyboardInterrupt:
         return early_failure("generation interrupted by caller", "interrupted")
     gen_input, gen_output, gen_total = generated["tokens"]

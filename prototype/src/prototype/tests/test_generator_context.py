@@ -1,8 +1,11 @@
 """Contract fragments for prompts: matching and rendering, no network."""
 
+import copy
+
 import pytest
 
 from prototype.generator.context import (
+    detect_operation_dependencies,
     documented_status_codes,
     find_operation,
     load_contract,
@@ -285,3 +288,123 @@ def test_openapi_31_false_schema_is_preserved_in_context():
     contract = {"openapi": "3.1.0", "info": {}, "paths": {"/items": {"get": {
         "responses": {"200": {"content": {"application/json": {"schema": False}}}}}}}}
     assert "application/json:false" in render_contract_for_generation(contract)
+
+
+ITEMS_CONTRACT = {
+    "openapi": "3.1.0",
+    "info": {"title": "Items", "version": "1"},
+    "paths": {
+        "/items": {
+            "post": {
+                "operationId": "createItem",
+                "responses": {"201": {"description": "Created", "content": {"application/json": {
+                    "schema": {"type": "object", "properties": {
+                        "id": {"type": "string", "format": "uuid"},
+                        "name": {"type": "string"}}}}}}},
+            },
+        },
+        "/items/{id}": {
+            "get": {
+                "operationId": "getItem",
+                "parameters": [{"name": "id", "in": "path", "required": True,
+                                "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "OK"}},
+            },
+        },
+    },
+}
+
+
+def test_dependency_detection_pairs_created_identifier_with_path_parameter():
+    assert detect_operation_dependencies(ITEMS_CONTRACT) == [{
+        "consumer": "GET /items/{id}",
+        "producer": "POST /items",
+        "identifiers": ("id",),
+        "codes": {"id": 201},
+        "kind": "inferred",
+    }]
+
+
+def test_dependency_detection_does_not_pair_across_resources():
+    contract = {"openapi": "3.1.0", "info": {}, "paths": {
+        "/orders": {"post": {"responses": {"201": {"content": {"application/json": {
+            "schema": {"type": "object", "properties": {"id": {"type": "string"}}}}}}}}},
+        "/items": {"get": {"responses": {"200": {"description": "OK"}}}},
+        "/items/{id}": {"get": {"responses": {"200": {"description": "OK"}}}},
+    }}
+    # POST /orders also creates an "id", but that belongs to another resource.
+    assert detect_operation_dependencies(contract) == []
+
+
+def test_dependency_detection_reads_array_item_fields():
+    contract = {"openapi": "3.1.0", "info": {}, "paths": {
+        "/nodes": {"get": {"responses": {"200": {"content": {"application/json": {
+            "schema": {"type": "array", "items": {"type": "object", "properties": {
+                "id": {"type": "string"}}}}}}}}}},
+        "/nodes/{id}": {"get": {"responses": {"200": {"description": "OK"}}}},
+    }}
+    assert [dep["producer"] for dep in detect_operation_dependencies(contract)] == ["GET /nodes"]
+
+
+def test_dependency_detection_marks_documented_links_and_avoids_duplicates():
+    contract = copy.deepcopy(ITEMS_CONTRACT)
+    contract["paths"]["/items"]["post"]["responses"]["201"]["links"] = {
+        "getItem": {"operationId": "getItem", "parameters": {"id": "$response.body#/id"}}}
+    assert detect_operation_dependencies(contract) == [{
+        "consumer": "GET /items/{id}",
+        "producer": "POST /items",
+        "identifiers": ("id",),
+        "codes": {"id": 201},
+        "kind": "documented",
+    }]
+
+
+def test_dependency_detection_resolves_operation_ref():
+    producer_response = {"links": {"open": {
+        "operationRef": "#/paths/~1sessions~1{id}/get",
+        "parameters": {"id": "$response.body#/token"}}}}
+    contract = {
+        "openapi": "3.1.0", "info": {},
+        "paths": {
+            "/sessions": {"post": {"responses": {"201": producer_response}}},
+            "/sessions/{id}": {"get": {"responses": {"200": {"description": "OK"}}}},
+        },
+    }
+    assert detect_operation_dependencies(contract) == [{
+        "consumer": "GET /sessions/{id}",
+        "producer": "POST /sessions",
+        "identifiers": ("id",),
+        "codes": {},
+        "kind": "documented",
+    }]
+
+
+def test_dependency_detection_limits_links_per_consumer():
+    paths = {route: {"post": {"responses": {"201": {"content": {"application/json": {
+        "schema": {"type": "object", "properties": {"id": {"type": "string"}}}}}}}}}
+        for route in ("/items", *(f"/items/v{index}" for index in range(1, 10)))}
+    paths["/items/{id}"] = {"get": {"responses": {"200": {"description": "OK"}}}}
+    deps = detect_operation_dependencies({"info": {}, "paths": paths})
+    assert len(deps) == 8
+    assert all(dep["consumer"] == "GET /items/{id}" for dep in deps)
+
+
+def test_render_contract_for_generation_lists_dependencies():
+    text = render_contract_for_generation(ITEMS_CONTRACT)
+    assert "Связи между операциями" in text
+    assert "- POST /items (creates id) -> GET /items/{id} (uses path: id) [inferred]" in text
+
+
+def test_render_contract_for_generation_lists_documented_link():
+    contract = copy.deepcopy(ITEMS_CONTRACT)
+    contract["paths"]["/items"]["post"]["responses"]["201"]["links"] = {
+        "getItem": {"operationId": "getItem", "parameters": {"id": "$response.body#/id"}}}
+    text = render_contract_for_generation(contract)
+    assert "- POST /items -> GET /items/{id} (uses id) [documented link]" in text
+
+
+def test_operation_fragment_contains_dependency_lines():
+    consumer = operation_fragment(ITEMS_CONTRACT, "get", "/items/7")
+    assert "depends on: POST /items (id — 201) [inferred]" in consumer
+    producer = operation_fragment(ITEMS_CONTRACT, "post", "/items")
+    assert "creates: id — used by GET /items/{id} [inferred]" in producer

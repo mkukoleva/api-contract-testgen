@@ -25,6 +25,10 @@ ENV_REPAIR_TOKEN_BUDGET = "TESTGEN_REPAIR_TOKEN_BUDGET"
 DEFAULT_TEST_FRAGMENT_LINES = 30
 DEFAULT_CONTRACT_FRAGMENT_CHARS = 1500
 DEFAULT_DIAGNOSTIC_CHARS = 2000
+# Schemathesis enrichment budget: the microservice stops the run at this
+# max_time; the HTTP client timeout adds its own margin on top.
+DEFAULT_SCHEMATHESIS_TIMEOUT_SECONDS = 60.0
+MAX_SCHEMATHESIS_TIMEOUT_SECONDS = 600.0
 
 
 def _str_path(value: Any, name: str) -> Path:
@@ -93,6 +97,13 @@ class GenerationSettings:
     contract_fragment_chars: int = DEFAULT_CONTRACT_FRAGMENT_CHARS
     diagnostic_chars: int = DEFAULT_DIAGNOSTIC_CHARS
     source_code_path: Path | str | None = None
+    # Optional context enrichment with a deterministic Schemathesis run
+    # (TZ v3 4.1.2.3). The digest is diagnostic context only: the contract
+    # remains the sole source of expected values. The service address falls
+    # back to SCHEMATHESIS_SERVICE_URL, then http://127.0.0.1:8080.
+    enrich_with_schemathesis: bool = True
+    schemathesis_service_url: str | None = None
+    schemathesis_timeout_seconds: float = DEFAULT_SCHEMATHESIS_TIMEOUT_SECONDS
     input_document: ContractDocument | None = field(default=None, repr=False, compare=False)
     source_context: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
@@ -151,6 +162,19 @@ class GenerationSettings:
         object.__setattr__(
             self, "diagnostic_chars", _non_negative_int(self.diagnostic_chars, "diagnostic_chars")
         )
+        if not isinstance(self.enrich_with_schemathesis, bool):
+            raise ValueError("enrich_with_schemathesis must be a bool")
+        if self.schemathesis_service_url is not None and (
+                not isinstance(self.schemathesis_service_url, str)
+                or not self.schemathesis_service_url.strip()):
+            raise ValueError("schemathesis_service_url must be a non-empty URL or None")
+        timeout = self.schemathesis_timeout_seconds
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                or not math.isfinite(timeout)
+                or not 0 < timeout <= MAX_SCHEMATHESIS_TIMEOUT_SECONDS):
+            raise ValueError(
+                f"schemathesis_timeout_seconds must be a finite number in "
+                f"(0, {MAX_SCHEMATHESIS_TIMEOUT_SECONDS}]")
 
 
 @dataclass(frozen=True)

@@ -65,8 +65,13 @@ def generate_suite(
     settings: Any,
     *,
     model: Any = None,
+    schemathesis_context: str = "",
 ) -> dict[str, Any]:
     """Generate and post-process test files with one structured LLM call.
+
+    ``schemathesis_context`` is an optional deterministic-tool digest of the
+    live service (TZ v3 4.1.2.3); it is diagnostic context only, the contract
+    stays the source of expected values.
 
     Returns: {prepared: tuple[PreparedFile, ...], errors: tuple[str, ...],
     tokens: (input, output, total), calls: int}. Files with unsafe names are
@@ -88,7 +93,8 @@ def generate_suite(
         return {"prepared": (), "errors": (f"invalid generation context: {exc}",),
                 "tokens": (0, 0, 0), "calls": 0}
     user_prompt = build_generation_prompt(contract_fragment,
-        source_context=(settings.source_context or {}).get("text", ""))
+        source_context=(settings.source_context or {}).get("text", ""),
+        schemathesis_context=schemathesis_context)
 
     try:
         message = llm.invoke(
