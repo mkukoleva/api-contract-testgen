@@ -45,7 +45,8 @@
 | `core.py` | Класс `Journal`: события, буфер до `attach`, запись, вырезание секретов, `close` | stdlib |
 | `render.py` | `render_markdown(events) -> str` для `journal.md` | stdlib |
 | `summary.py` | `record_generation_result(journal, data)`: события `tests.run` и `repair` из результата генератора | stdlib |
-| `langchain.py` | `JournalCallbackHandler(BaseCallbackHandler)` | `langchain_core` (импорт только в этом файле) |
+| `langchain.py` | `JournalCallbackHandler(BaseCallbackHandler)`, `journal_context(handler)` | `langchain_core` (импорт только в этом файле) |
+| `launch.py` | `launch_parameters(...)` — белый список параметров запуска (4.1.8.3) | stdlib |
 
 Импорт `prototype.journal` не загружает LangChain, LLM и `.env`
 (как `prototype.storage`). `JournalCallbackHandler` экспортируется лениво
@@ -113,9 +114,12 @@
 `response.llm_output["token_usage"]`; при отсутствии — `null`.
 
 **Дедупликация**: обработчик хранит `run_id` начатых вызовов и пишет одно
-событие на `run_id` (проверено: LangChain 1.6 не вызывает один обработчик
-дважды, даже если он передан и модели, и в `invoke`; защита — на случай других
-версий).
+событие на `run_id` (LangChain 1.6 не вызывает один обработчик дважды, даже
+если он передан несколькими путями; защита — на случай других версий).
+
+**Подключение**: `journal_context(handler)` — контекстный менеджер в
+`journal/langchain.py`; ставит обработчик в контекстную переменную на время
+блока и сбрасывает её при выходе.
 
 ## Безопасность данных
 
@@ -158,9 +162,17 @@
 
 | Файл | Изменение |
 |---|---|
-| `llm/model.py` | `build_model(callbacks=None)`: при непустом списке передать `callbacks` в `ChatOpenAI` |
-| `__init__.py` → `build_agent` | параметр `callbacks=None`, пробрасывается в `build_model` |
-| `__init__.py` → `run()` | создать `Journal` в начале; `run.start`; `stage` после ключевых шагов; `attach(run_dir)` сразу после создания `run_dir`; передать обработчик в `build_agent(callbacks=…)` и `agent.invoke(request, config={"callbacks": [handler]})`; `record_generation_result` для каждого результата генератора; `run.end` и `close()` в `finally` |
+| `__init__.py` → `run()` | становится обёрткой: создаёт `Journal`, пишет `run.start`, внутри `with journal_context(handler)` вызывает прежнее тело (переименовано в `_run`, получает `journal`), пишет `run.end` и `close()` в `finally` |
+| `__init__.py` → `_run` (бывшее тело `run`) | `stage` после ключевых шагов; `attach(run_dir)` сразу после создания `run_dir`; `record_generation_result` для каждого результата генератора; `launch` в `run-metadata.json` |
+
+`llm/model.py`, `build_agent` и вызовы `agent.invoke`/`agent.stream` **не
+меняются**. Обработчик подключается через контекстную переменную, которую
+`journal_context` регистрирует хуком `langchain_core.tracers.context.register_configure_hook(var, inheritable=True)`:
+LangChain добавляет его ко всем вызовам моделей и инструментов внутри контекста,
+включая внутренние вызовы генератора (проверено на LangChain 1.6: ловит вызов
+модели с явным `config`, вызов инструмента и не ловит ничего вне контекста).
+Так существующие тесты, подменяющие `build_agent` функцией без параметров, а
+`invoke` — функцией одного аргумента, продолжают работать.
 | `__init__.py` → `_report_input_error` | необязательный параметр `journal`: `contract.error`, `attach(directory)` к папке `input-error` |
 | `__init__.py` → `inspect_contract` | журнал этапов в папке отчёта (без LLM) |
 | `__init__.py` → `run-metadata.json` | блок `launch` (4.1.8.3) |
