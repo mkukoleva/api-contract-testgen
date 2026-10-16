@@ -131,3 +131,55 @@ def test_import_does_not_load_langchain():
              if not key.startswith(("DEEPCODE_", "OPENAI_"))},
     )
     assert result.returncode == 0, result.stderr
+
+
+def event(seq, name, status="info", **data):
+    return {"seq": seq, "ts": "2026-10-16T12:00:00.000+00:00", "elapsed_s": float(seq),
+            "event": name, "status": status, "data": data}
+
+
+def test_markdown_has_sections_from_spec():
+    from prototype.journal.render import render_markdown
+
+    text = render_markdown([
+        event(1, "run.start", mode="generate", contract="demo.yaml"),
+        event(2, "llm.call", "ok", model="m", duration_s=1.5, input_tokens=10, output_tokens=1, total_tokens=11),
+        event(3, "llm.call", "timeout", model="m", duration_s=60.0, input_tokens=20, output_tokens=2,
+              total_tokens=22, error="APITimeoutError: Request timed out."),
+        event(4, "tests.run", "ok", attempt=1, runner_status="completed", passed=3, failed=1, errors=0, skipped=0),
+        event(5, "run.end", exit_code=0, duration_s=5.0, outcome="ok"),
+    ])
+    assert "# Журнал прогона" in text
+    assert "Вызовов LLM: 2" in text
+    assert "Токены: 30 / 3" in text
+    assert "Таймаутов: 1" in text
+    assert "| 1 | completed | 3 | 1 |" in text
+    assert "## Ошибки" in text and "Request timed out" in text
+    assert "## Хронология" in text
+
+
+def test_empty_sections_are_omitted():
+    from prototype.journal.render import render_markdown
+
+    text = render_markdown([event(1, "run.start", mode="agent"), event(2, "run.end", exit_code=0, outcome="ok")])
+    assert "## LLM" not in text
+    assert "## Тесты" not in text
+    assert "## Ошибки" not in text
+    assert "## Хронология" in text
+
+
+def test_table_cells_are_escaped():
+    from prototype.journal.render import render_markdown
+
+    text = render_markdown([event(1, "contract.error", "error", error="a|b\nc")])
+    assert r"a\|b c" in text
+
+
+def test_close_writes_markdown_by_default(tmp_path):
+    from prototype.journal import Journal
+
+    journal = Journal()
+    journal.attach(tmp_path)
+    journal.emit("run.start", mode="agent")
+    journal.close()
+    assert "# Журнал прогона" in (tmp_path / "journal.md").read_text(encoding="utf-8")

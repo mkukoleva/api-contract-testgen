@@ -95,6 +95,8 @@ class Journal:
             self._write(record)
 
     def close(self, render: Callable[[list[dict]], str] | None = None) -> None:
+        if render is None:
+            from .render import render_markdown as render
         if self._closed:
             return
         self._closed = True
@@ -104,7 +106,7 @@ class Journal:
             except OSError as exc:
                 self._fail(exc)
             self._file = None
-        if self._directory is None or self._disabled or render is None:
+        if self._directory is None or self._disabled:
             return
         try:
             (self._directory / MARKDOWN_NAME).write_text(render(self.events), encoding="utf-8")
