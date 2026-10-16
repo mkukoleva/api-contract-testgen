@@ -63,7 +63,8 @@ class Journal:
     def disabled(self) -> bool:
         return self._disabled
 
-    def emit(self, event: str, status: str = "info", **data: Any) -> None:
+    def emit(self, event: str, status: str = "info", /, **data: Any) -> None:
+        # event/status are positional-only so data may carry its own `status` field.
         record = {
             "seq": len(self._events) + 1,
             "ts": self._now().isoformat(timespec="milliseconds"),
