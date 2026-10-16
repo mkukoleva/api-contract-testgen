@@ -40,6 +40,7 @@ pytest, сохранение версий, изолированный запус
 - [Сохранение сгенерированных тестов](docs/adr/0003-generated-tests-storage.md).
 - [Границы self-repair](docs/adr/0004-generation-self-repair.md).
 - [M3 по ТЗ v3: изоляция, self-repair и проверка](docs/testing/m3-verification.md).
+- [Журнал выполнения прогона и роли](docs/adr/0005-run-journal.md).
 
 ## Проверка одной командой
 
