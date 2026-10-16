@@ -183,3 +183,25 @@ def test_close_writes_markdown_by_default(tmp_path):
     journal.emit("run.start", mode="agent")
     journal.close()
     assert "# Журнал прогона" in (tmp_path / "journal.md").read_text(encoding="utf-8")
+
+
+def test_concurrent_emits_have_unique_sequence_numbers(tmp_path):
+    import threading
+    from prototype.journal import Journal
+
+    journal = Journal()
+    journal.attach(tmp_path)
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=lambda: [journal.emit("tick") for _ in range(3000)]) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(previous)
+    journal.close()
+    seqs = [event["seq"] for event in lines(tmp_path)]
+    assert len(seqs) == 24000
+    assert sorted(seqs) == list(range(1, 24001))

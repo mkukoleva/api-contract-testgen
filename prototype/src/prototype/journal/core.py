@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
 import time
 from typing import Any
 
@@ -50,6 +51,8 @@ class Journal:
         self._file = None
         self._disabled = False
         self._closed = False
+        # LangGraph may run tools (and their callbacks) in parallel threads.
+        self._lock = threading.RLock()
 
     @property
     def events(self) -> list[dict]:
@@ -65,6 +68,10 @@ class Journal:
 
     def emit(self, event: str, status: str = "info", /, **data: Any) -> None:
         # event/status are positional-only so data may carry its own `status` field.
+        with self._lock:
+            self._emit(event, status, data)
+
+    def _emit(self, event: str, status: str, data: dict) -> None:
         record = {
             "seq": len(self._events) + 1,
             "ts": self._now().isoformat(timespec="milliseconds"),
@@ -78,7 +85,10 @@ class Journal:
             self._write(record)
 
     def attach(self, directory: Path | str) -> None:
-        directory = Path(directory)
+        with self._lock:
+            self._attach(Path(directory))
+
+    def _attach(self, directory: Path) -> None:
         if self._directory is not None:
             if directory != self._directory:
                 raise ValueError(f"journal is already attached to {self._directory}")
@@ -98,6 +108,10 @@ class Journal:
     def close(self, render: Callable[[list[dict]], str] | None = None) -> None:
         if render is None:
             from .render import render_markdown as render
+        with self._lock:
+            self._close(render)
+
+    def _close(self, render: Callable[[list[dict]], str]) -> None:
         if self._closed:
             return
         self._closed = True

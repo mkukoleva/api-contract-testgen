@@ -134,3 +134,48 @@ def test_inspect_contract_writes_journal(workdir):
     assert (run_dir / "contract-report.json").is_file()
     assert events[0]["data"]["mode"] == "inspect"
     assert events[-1]["event"] == "run.end"
+
+
+@pytest.mark.parametrize("entry", ["run", "inspect"])
+def test_contract_url_credentials_never_reach_any_file(workdir, entry):
+    from prototype.parser.contract import ContractInputError
+
+    url = "https://admin:S3cr3t@example.invalid/openapi.yaml"
+    with pytest.raises(ContractInputError):
+        if entry == "run":
+            prototype.run(url, report_dir=workdir)
+        else:
+            prototype.inspect_contract(url, report_dir=workdir)
+    written = [path for path in workdir.rglob("*") if path.is_file() and path.name != "unused"]
+    assert any(path.name == "journal.jsonl" for path in written)
+    for path in written:
+        assert "S3cr3t" not in path.read_text(encoding="utf-8"), path.name
+
+
+def test_failure_before_run_dir_still_writes_journal(workdir):
+    from prototype.generator.contracts import GenerationSettings
+    from prototype.parser.contract import ContractInputError
+
+    (workdir / "other.yaml").write_text(CONTRACT, encoding="utf-8")
+    with pytest.raises(ContractInputError):
+        prototype.run("unused", report_dir=workdir,
+                      generation_settings=GenerationSettings(contract_path="other.yaml", output_dir=workdir))
+    run_dir, events = journal_in(workdir)
+    assert events[-1]["event"] == "run.end" and events[-1]["data"]["outcome"] == "error"
+    assert (run_dir / "journal.md").is_file()
+
+
+def test_unexpected_generator_result_does_not_break_run(workdir, monkeypatch):
+    from prototype.generator.contracts import GenerationSettings
+
+    class ToolMessage:
+        content = json.dumps({**GENERATION, "runnability": "weird", "repair_log": ["not-a-dict"]})
+
+    messages = [ToolMessage()]
+    monkeypatch.setattr(prototype, "build_agent", lambda **kw: SimpleNamespace(
+        stream=lambda *a, **k: iter([{"messages": messages}]), invoke=lambda _: {"messages": messages}))
+    code = prototype.run("unused", report_dir=workdir,
+                         generation_settings=GenerationSettings(contract_path="unused", output_dir=workdir))
+    _, events = journal_in(workdir)
+    assert events[-1]["event"] == "run.end" and events[-1]["data"]["outcome"] == "ok"
+    assert events[-1]["data"]["exit_code"] == code

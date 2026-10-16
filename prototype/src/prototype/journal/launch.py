@@ -44,7 +44,7 @@ def launch_parameters(*, mode: str, contract: str, report_dir, source_code,
                       generation_settings=None, testing_settings=None) -> dict[str, Any]:
     launch = {
         "mode": mode,
-        "contract": str(contract),
+        "contract": strip_credentials(str(contract)),
         "report_dir": None if report_dir is None else str(report_dir),
         "source_code": None if source_code is None else str(source_code),
     }

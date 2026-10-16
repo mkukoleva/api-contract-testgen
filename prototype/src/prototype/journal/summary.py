@@ -1,11 +1,20 @@
 """Journal events from a generator result: generation.result, repair, tests.run."""
 
+import sys
 from typing import Any
 
 from .core import Journal
 
 
 def record_generation_result(journal: Journal, data: dict[str, Any]) -> None:
+    """Never raises: an unexpected result shape must not break the run."""
+    try:
+        _record(journal, data)
+    except Exception as exc:  # journal is best-effort
+        print(f"[JOURNAL] Не удалось записать итог генератора: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
+def _record(journal: Journal, data: dict[str, Any]) -> None:
     runnability = data.get("runnability") or {}
     journal.emit(
         "generation.result",

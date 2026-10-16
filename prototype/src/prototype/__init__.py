@@ -226,12 +226,17 @@ def _journaled(mode, contract_path, report_dir, source_code_path, body, *,
     launch = launch_parameters(mode=mode, contract=contract_path, report_dir=report_dir,
                                source_code=source_code_path, generation_settings=generation_settings,
                                testing_settings=testing_settings)
-    journal.emit("run.start", mode=mode, contract=str(contract_path), launch=launch)
+    journal.emit("run.start", mode=mode, contract=launch["contract"], launch=launch)
     started = _time.monotonic()
     try:
         with journal_context(JournalCallbackHandler(journal)):
             code = body(journal, launch)
     except BaseException as exc:
+        if journal.directory is None:
+            # Failed before the run directory existed: keep the journal next to other early reports.
+            root = Path(report_dir) if report_dir is not None else (
+                Path.cwd() / ".contract-runs" if mode == "inspect" else REPORTS_DIR)
+            journal.attach(root / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex))
         journal.emit("run.end", "error", exit_code=None, outcome="error",
                      duration_s=round(_time.monotonic() - started, 3), error=describe_error(exc))
         raise
