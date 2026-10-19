@@ -60,7 +60,7 @@ GENERATION_SYSTEM_PROMPT = '''\
    Пример:
 
        def test_get_catalogue(base_url, api_client):
-           """GET /catalogue; штатный сценарий; ожидается HTTP 200."""
+           '''GET /catalogue; штатный сценарий; ожидается HTTP 200.'''
            response = api_client.get(f"{base_url}/catalogue")
            assert response.status_code == 200
 
