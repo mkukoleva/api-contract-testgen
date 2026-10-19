@@ -181,7 +181,7 @@ def _append_metrics_to_report(
         file.write(metrics_markdown)
 
 
-def _report_input_error(exc, report_dir=None, *, inspect=False):
+def _report_input_error(exc, report_dir=None, *, inspect=False, journal=None):
     """Persist early failure without raw input/URLs, model calls or invented facts."""
     import html
     import sys
@@ -189,6 +189,8 @@ def _report_input_error(exc, report_dir=None, *, inspect=False):
     root = Path(report_dir) if report_dir is not None else (Path.cwd() / ".contract-runs" if inspect else REPORTS_DIR)
     directory = root / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex)
     payload = {"status": "input_error", "stage": "contract_input", "error": describe_error(exc)}
+    if journal is not None:
+        journal.emit("contract.error", "error", stage="contract_input", error=payload["error"])
     try:
         directory.mkdir(parents=True, exist_ok=False)
         text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
@@ -196,28 +198,71 @@ def _report_input_error(exc, report_dir=None, *, inspect=False):
         (directory / "input-error.md").write_text(
             "# Ошибка загрузки входных данных\n\n<pre>" + html.escape(text) + "</pre>\n", encoding="utf-8")
         print(f"[CORE] Диагностика входных данных: {directory}", file=sys.stderr)
+        if journal is not None:
+            journal.attach(directory)
     except (OSError, UnicodeError) as report_error:
         print(f"[CORE] Не удалось сохранить отчёт об ошибке входа: {describe_error(report_error)}", file=sys.stderr)
 
 
-def _load_inputs(contract_path, source_code_path, report_dir, *, inspect=False):
+def _load_inputs(contract_path, source_code_path, report_dir, *, inspect=False, journal=None):
     from .parser.contract import ContractInputError, load_contract_document
     from .parser.source_context import read_source_context
     try:
         document = load_contract_document(contract_path)
         return document, read_source_context(source_code_path, document.data)
     except (ContractInputError, OSError, UnicodeError) as exc:
-        _report_input_error(exc, report_dir, inspect=inspect)
+        _report_input_error(exc, report_dir, inspect=inspect, journal=journal)
         raise
+
+
+def _journaled(mode, contract_path, report_dir, source_code_path, body, *,
+               generation_settings=None, testing_settings=None):
+    """Run body(journal, launch) with a run journal (ТЗ v3 4.1.8): run.start ... run.end."""
+    import time as _time
+    from .journal import Journal, JournalCallbackHandler, journal_context
+    from .journal.launch import launch_parameters
+    from .llm.diagnostics import describe_error
+    journal = Journal()
+    launch = launch_parameters(mode=mode, contract=contract_path, report_dir=report_dir,
+                               source_code=source_code_path, generation_settings=generation_settings,
+                               testing_settings=testing_settings)
+    journal.emit("run.start", mode=mode, contract=launch["contract"], launch=launch)
+    started = _time.monotonic()
+    try:
+        with journal_context(JournalCallbackHandler(journal)):
+            code = body(journal, launch)
+    except BaseException as exc:
+        if journal.directory is None:
+            # Failed before the run directory existed: keep the journal next to other early reports.
+            root = Path(report_dir) if report_dir is not None else (
+                Path.cwd() / ".contract-runs" if mode == "inspect" else REPORTS_DIR)
+            journal.attach(root / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex))
+        journal.emit("run.end", "error", exit_code=None, outcome="error",
+                     duration_s=round(_time.monotonic() - started, 3), error=describe_error(exc))
+        raise
+    else:
+        journal.emit("run.end", exit_code=code, outcome="ok",
+                     duration_s=round(_time.monotonic() - started, 3))
+        return code
+    finally:
+        journal.close()
 
 
 def inspect_contract(contract_path: str, *, report_dir=None, source_code_path=None) -> None:
     """Validate input and persist its identity without creating an LLM client."""
+    _journaled("inspect", contract_path, report_dir, source_code_path,
+               lambda journal, launch: _inspect_contract(contract_path, report_dir=report_dir,
+                                                         source_code_path=source_code_path, journal=journal))
+
+
+def _inspect_contract(contract_path, *, report_dir, source_code_path, journal) -> None:
     from .parser.contract import save_contract_snapshot
-    document, context = _load_inputs(contract_path, source_code_path, report_dir, inspect=True)
+    document, context = _load_inputs(contract_path, source_code_path, report_dir, inspect=True, journal=journal)
     root = Path(report_dir) if report_dir is not None else Path.cwd() / ".contract-runs"
     directory = root / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex)
     identity = save_contract_snapshot(document, directory / "inputs")
+    journal.attach(directory)
+    journal.emit("stage", name="contract_loaded", operations=identity.get("operation_count"))
     data = {"contract": identity, "source_code": context["metadata"]}
     (directory / "inputs" / "source-context.json").write_text(
         json.dumps(context, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -232,6 +277,7 @@ def inspect_contract(contract_path: str, *, report_dir=None, source_code_path=No
         + "\n\n" + "\n".join(f"- `{operation}`" for operation in identity["operations"]) + "\n",
         encoding="utf-8")
     print(json.dumps(data, ensure_ascii=False, indent=2))
+    journal.emit("stage", name="report_saved")
     print(f"[CORE] Проверка без LLM; отчёты: {directory}")
 
 
@@ -239,8 +285,21 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
         source_code_path=None, testing_settings=None) -> int | None:
     """
     Запустить полный цикл работы агента для одного API-контракта.
-    """
 
+    Каждый запуск ведёт журнал прогона (journal.jsonl / journal.md, ТЗ v3 4.1.8).
+    """
+    mode = "testing" if testing_settings is not None else "generate" if generation_settings is not None else "agent"
+    source_path = source_code_path if source_code_path is not None else getattr(generation_settings, "source_code_path", None)
+    return _journaled(
+        mode, contract_path, report_dir, source_path,
+        lambda journal, launch: _run(contract_path, report_dir=report_dir, generation_settings=generation_settings,
+                                     source_code_path=source_code_path, testing_settings=testing_settings,
+                                     journal=journal, launch=launch),
+        generation_settings=generation_settings, testing_settings=testing_settings)
+
+
+def _run(contract_path, *, report_dir, generation_settings, source_code_path, testing_settings,
+         journal, launch) -> int | None:
     from .evaluate.metrics import (
         calculate_metrics,
         format_metrics_markdown,
@@ -253,8 +312,10 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
     print("[CORE] Читаю API-контракт...")
 
     source_path = source_code_path if source_code_path is not None else getattr(generation_settings, "source_code_path", None)
-    document, source_context = _load_inputs(contract_path, source_path, report_dir)
+    document, source_context = _load_inputs(contract_path, source_path, report_dir, journal=journal)
     contract = summarize_contract(document.data, document.source)
+    journal.emit("stage", name="contract_loaded", operations=contract.get("operation_count"),
+                 version=contract.get("version"))
     if generation_settings is not None:
         from .parser.contract import ContractInputError
         requested = normalize_location(contract_path)
@@ -270,6 +331,7 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
     report_root = Path(report_dir) if report_dir is not None else REPORTS_DIR
     run_dir = report_root / f"{now.strftime('%Y-%m-%d_%H%M%S')}_{uuid4().hex}"
     identity = save_contract_snapshot(document, run_dir / "inputs")
+    journal.attach(run_dir)
     if testing_settings is not None:
         testing_settings = replace(testing_settings, contract_path=Path(identity["snapshot_path"]),
                                    output_dir=run_dir / "tools")
@@ -311,6 +373,10 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
             from .llm.diagnostics import describe_error
             agent = None
             agent_error = describe_error(exc)
+    if agent_error:
+        journal.emit("stage", "error", name="agent_built", error=agent_error)
+    else:
+        journal.emit("stage", name="agent_built")
 
     agent_contract = dict(contract)
     if generation_settings is None and document.resolved_url:
@@ -336,6 +402,7 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
 
     # Засекаем именно время работы агентного цикла.
     generation_started_at = time.perf_counter()
+    journal.emit("stage", name="agent_started")
 
     request = {
             "messages": [
@@ -368,6 +435,8 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
                 agent_error = describe_error(exc)
 
     generation_time = time.perf_counter() - generation_started_at
+    journal.emit("stage", "error" if agent_error else "info", name="agent_finished",
+                 duration_s=round(generation_time, 3), **({"error": agent_error} if agent_error else {}))
 
     final_message = f"Ошибка агента: {agent_error}" if agent_error else _extract_final_message(result)
     generation_results = []
@@ -389,6 +458,9 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
                 if data.get("tool") == select_backend(testing_settings.intent) + "_tool":
                     if data not in external_results:
                         external_results.append(data)
+        from .journal.summary import record_generation_result
+        for data in generation_results:
+            record_generation_result(journal, data)
         from .service_tools.runner.tools import _compact_generation_result
         from .service_tools.selection import compact_result
         print("[TOOLS] Фактические результаты инструмента (подробности в отчёте):")
@@ -419,6 +491,7 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
         "runtime": runtime_versions(),
         "generation_reports": [data.get("report_paths") for data in generation_results],
         "tool_reports": [data.get("report_paths") for data in external_results],
+        "launch": launch,
     }
     metadata_path = run_dir / "run-metadata.json"
     metadata_path.write_text(json.dumps(provenance, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
@@ -444,6 +517,7 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
         report_content,
         encoding="utf-8",
     )
+    journal.emit("stage", name="report_saved")
 
     if generation_settings is not None:
         with report_path.open("a", encoding="utf-8") as file:
@@ -508,6 +582,7 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
         report_path,
         metrics_markdown,
     )
+    journal.emit("stage", name="metrics_saved")
 
     print()
     print("=" * 60)
