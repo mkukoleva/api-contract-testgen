@@ -7,7 +7,7 @@ import hashlib
 import inspect
 
 
-GENERATION_SYSTEM_PROMPT = """\
+GENERATION_SYSTEM_PROMPT = '''\
 Ты — генератор pytest-тестов для тестирования API по OpenAPI/Swagger-контракту.
 
 Правила генерации:
@@ -67,7 +67,7 @@ GENERATION_SYSTEM_PROMPT = """\
 Верни строго ОДИН JSON-объект вида
 {"files": [{"name": "test_<name>.py", "code": "<полный код>"}, ...]} —
 без markdown-разметки (без ```), без пояснений и текста вне JSON.
-"""
+'''
 
 
 def build_generation_prompt(
@@ -175,3 +175,70 @@ def build_repair_prompt(
 Упавший фрагмент теста:
 ```python
 {test_fragment}
+```
+
+Релевантная часть контракта:
+{contract_fragment}
+
+Сокращённая диагностика падения:
+{diagnostics}
+
+Помни: ослаблять или удалять assert запрещено; несоответствие ответа сервиса
+документированным ответам контракта — дефект сервиса, а не повод менять тест.
+"""
+
+
+class GeneratedFileSpec(BaseModel):
+    """One file produced by the generation call."""
+
+    name: str = Field(description="file name, must match test_[a-z0-9_]+.py")
+    code: str = Field(description="full python source of the test module")
+
+
+class GenerationOutput(BaseModel):
+    """Structured generation result: the list of generated files."""
+
+    files: list[GeneratedFileSpec] = Field(
+        min_length=1, description="generated pytest modules, non-empty"
+    )
+
+
+class RepairOutput(BaseModel):
+    """Structured repair result: corrected code (function or module)."""
+
+    code: str = Field(description="corrected code, whole function or whole file")
+    note: str | None = Field(default=None, description="optional short explanation")
+
+
+def clip_code(code: str, max_lines: int) -> str:
+    """Clip a code fragment to max_lines, keeping the failure area visible."""
+    if max_lines <= 0:
+        return "# (код обрезан)"
+    lines = code.splitlines()
+    if len(lines) <= max_lines:
+        return code
+    return "\n".join(lines[:max_lines]) + "\n    # …(обрезано)"
+
+
+def diag_tail(message: str | None, max_chars: int) -> str:
+    """Return the shortened tail of the failure diagnostics.
+
+    The useful part of pytest output (traceback tail, exception, assertion
+    comparison) is at the end; keeping the tail saves tokens (ADR 0004).
+    """
+    if not message:
+        return "(диагностика отсутствует)"
+    if max_chars <= 0:
+        return "…(диагностика обрезана)"
+    if len(message) <= max_chars:
+        return message
+    return "…(обрезано начало)\n" + message[-max_chars:]
+
+
+def prompt_versions() -> dict[str, str]:
+    """Fingerprint the system prompt and builder template, without test/contract data."""
+    return {f"{name}_sha256": hashlib.sha256(
+        (system + "\n" + inspect.getsource(builder)).encode("utf-8")).hexdigest()
+        for name, system, builder in (
+            ("generation", GENERATION_SYSTEM_PROMPT, build_generation_prompt),
+            ("repair", REPAIR_SYSTEM_PROMPT, build_repair_prompt))}
