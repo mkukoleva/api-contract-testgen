@@ -84,6 +84,8 @@ def read_result(events_path: Path, duration_seconds: float) -> RunResult:
                             or not isinstance(item["path"], str) or not item["path"].startswith("/")
                             or type(item["status_code"]) is not int or not 100 <= item["status_code"] <= 599):
                             raise ValueError("invalid HTTP observation")
+                        if "request_body" in event:
+                            item["request_body"] = event["request_body"]
                         observations.append(item)
                 elif kind == "http_incomplete":
                     observations_complete = False

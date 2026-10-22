@@ -38,6 +38,58 @@ def settings(tmp_path, **kwargs):
 
 
 @CATALOGUE
+def test_generated_story_uses_real_response_id_and_verifies_final_goal(tmp_path):
+    from prototype.tests.test_generator_stories import CODE, STORY_PATH
+    model = ScriptedModel([json.dumps({"files": [{"name": "test_story.py", "code": CODE}]})])
+    run = run_generation_pipeline(settings(tmp_path, user_story_path=STORY_PATH), model=model)
+    assert run.status == "incomplete_categories", run.to_dict()
+    assert run.category_evidence['status'] == 'incomplete'
+    assert any('Missing required test categories' in error for error in run.generator_errors)
+    assert run.run_result['exit_code'] == 0
+    assert run.run_result["summary"]["passed"] == 1
+    assert run.attempts == 0 and len(model.calls) == 1
+    assert run.provenance["user_story"]["steps"][1]["bindings"][0]["pointer"] == "/0/id"
+    saved = Path(run.saved_versions[0]["tests_dir"]) / "test_story.py"
+    assert saved.read_text(encoding="utf-8") == CODE
+
+
+@CATALOGUE
+def test_generated_http_suite_uses_trusted_fixtures_and_is_saved_unchanged(tmp_path):
+    code = (
+        "def test_normal_catalogue(base_url, api_client):\n"
+        "    response = api_client.get(base_url + '/catalogue')\n"
+        "    assert response.status_code == 200\n"
+        "    products = response.json()\n"
+        "    assert isinstance(products, list)\n"
+        "    for product in products:\n"
+        "        assert isinstance(product, dict)\n"
+        "        for field in ('id', 'name', 'description', 'imageUrl', 'price', 'count', 'tag'):\n"
+        "            assert field in product\n"
+        "        assert type(product['price']) in (int, float)\n"
+        "        assert type(product['count']) is int\n"
+        "\ndef test_normal_size(base_url, api_client):\n"
+        "    response = api_client.get(base_url + '/catalogue/size')\n"
+        "    assert response.status_code == 200\n"
+        "    assert isinstance(response.json(), dict)\n"
+        "    assert type(response.json()['size']) is int\n"
+    )
+    model = ScriptedModel([json.dumps({'files': [{'name': 'test_http.py', 'code': code}]})])
+    run = run_generation_pipeline(settings(tmp_path), model=model)
+    assert run.status == 'incomplete_categories', run.to_dict()
+    missing = {row['operation'] for row in run.category_evidence['operations']
+               if row['categories']['normal']['status'] == 'missing'}
+    assert missing == {'GET /catalogue/{id}', 'GET /tags'}
+    assert run.run_result['exit_code'] == 0
+    assert run.attempts == 0 and len(model.calls) == 1
+    assert run.run_result['summary']['passed'] == 2
+    assert run.runnability['runnability_percent'] == 100
+    assert len(run.saved_versions) == 1
+    saved = Path(run.saved_versions[0]['tests_dir']) / 'test_http.py'
+    assert saved.read_text(encoding='utf-8') == code
+    assert Path(run.report_paths['json']).is_file()
+
+
+@CATALOGUE
 def test_generated_suite_repairs_syntax_import_and_fixture_inside_isolation(tmp_path):
     broken = (
         "@pytest.mark.parametrize('limit', [1])\n"
@@ -53,7 +105,10 @@ def test_generated_suite_repairs_syntax_import_and_fixture_inside_isolation(tmp_
         json.dumps({"files": [{"name": "test_catalogue.py", "code": broken}]}),
         syntax_fixed, import_fixed, fixture_fixed])
     run = run_generation_pipeline(settings(tmp_path), model=model)
-    assert run.status == "success", run.to_dict()
+    assert run.status == "incomplete_categories", run.to_dict()
+    assert run.category_evidence['status'] == 'incomplete'
+    assert any('Missing required test categories' in error for error in run.generator_errors)
+    assert run.run_result['exit_code'] == 0
     assert run.attempts == 3
     assert len(model.calls) == 4
     assert len(run.saved_versions) == 4

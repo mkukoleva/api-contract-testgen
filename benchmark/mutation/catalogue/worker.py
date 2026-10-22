@@ -44,8 +44,13 @@ def pytest_runtest_makereport(item, call):
     record = {'nodeid': item.nodeid, 'outcome': report.outcome, 'phase': report.when}
     if report.failed:
         record['message'] = str(report.longrepr)
-        assertion = call.excinfo is not None and call.excinfo.errisinstance(AssertionError)
-        record['failure_kind'] = 'assertion' if assertion else 'other'
+        record['failure_kind'] = 'other'
+        if call.excinfo is not None:
+            for exception, kind in ((AssertionError, 'assertion'), (KeyError, 'key_error'),
+                                    (TypeError, 'type_error')):
+                if call.excinfo.errisinstance(exception):
+                    record['failure_kind'] = kind
+                    break
         if call.excinfo is not None:
             entry = call.excinfo.traceback[-1]
             record['failure_signature'] = f'{entry.path}:{entry.lineno}:{call.excinfo.typename}'

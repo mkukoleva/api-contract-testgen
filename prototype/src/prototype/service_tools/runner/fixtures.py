@@ -9,6 +9,7 @@ is reachable, and the policy suite verifies that before generated tests run.
 """
 
 import os
+import json
 
 import pytest
 from urllib.parse import urlsplit
@@ -16,6 +17,25 @@ from urllib.parse import urlsplit
 
 def observe_http(**event):
     """Worker installs its event sink; direct fixture use has no side effects."""
+
+
+def request_body_evidence(request):
+    """Bounded JSON evidence only; no headers, cookies or raw non-JSON data."""
+    body = request.body
+    if body is None or body == b"" or body == "":
+        return {"kind": "absent"}
+    if not isinstance(body, (str, bytes)) or len(body) > 2048:
+        return {"kind": "unavailable"}
+    if request.headers.get("Content-Type", "").split(";", 1)[0].lower() != "application/json":
+        return {"kind": "unavailable"}
+    try:
+        value = json.loads(body)
+        encoded = json.dumps(value, allow_nan=False, ensure_ascii=True)
+        if len(encoded) > 2048:
+            return {"kind": "unavailable"}
+        return {"kind": "json", "value": value}
+    except (ValueError, UnicodeError, RecursionError):
+        return {"kind": "malformed"}
 
 
 @pytest.fixture
@@ -61,7 +81,7 @@ def api_client(base_url):
             # the tested service. Contract paths are relative to its base URL.
             if origin(observed) == origin(target) and (not prefix or path == prefix or path.startswith(prefix + "/")):
                 observe_http(method=request.method.upper(), path=path[len(prefix):] or "/",
-                             status_code=response.status_code)
+                             status_code=response.status_code, request_body=request_body_evidence(request))
             return response
 
     session = _Client()

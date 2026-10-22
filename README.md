@@ -59,3 +59,11 @@ runner (`docker build -t api-contract-pytest-runner:step5 prototype/src/prototyp
 Повторные запуски не требуют правки файлов, ключей LLM и установки
 зависимостей. Обычный CI (`.github/workflows/ci.yml`) использует сохранённые
 наборы тестов `benchmark/pytest-runner/saved-sets/` без платной генерации.
+
+## Приёмка HTTP-генерации и mutation testing
+
+[Отчёт по задачам, команды запуска и связь с ТЗ](docs/reports/mixed/report_mutation_testing.md).
+Для задач 2.2.9 и HTTP-части 4.1.4: `DEEPCODE_MAX_OUTPUT_TOKENS=16000 prototype/.venv/bin/python tools/accept_tasks.py`.
+Запуск использует Docker и реальную LLM. Ограниченная unit-генерация проверяется
+отдельно командой `prototype/.venv/bin/python tools/accept_unit.py`; статус
+последнего прогона указан в отчёте.

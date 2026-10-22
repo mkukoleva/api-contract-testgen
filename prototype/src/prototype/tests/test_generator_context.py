@@ -507,3 +507,13 @@ def test_operation_fragment_contains_dependency_lines():
     assert "depends on: POST /items (id — 201) [inferred]" in consumer
     producer = operation_fragment(ITEMS_CONTRACT, "post", "/items")
     assert "creates: id — used by GET /items/{id} [inferred]" in producer
+def test_catalogue_generation_contains_all_required_product_fields():
+    from pathlib import Path
+    contract = load_contract(Path(__file__).resolve().parents[4] /
+                             "benchmark/catalogue/catalogue.swagger.json")
+    text = render_contract_for_generation(contract)
+    assert len(text) < 8000
+    for field in ("id", "name", "description", "imageUrl", "price", "count", "tag"):
+        assert field + "*:" in text
+    assert "count*:integer" in text and "price*:number" in text
+    assert "imageUrl*:array[string]" in text and "tag*:array[string]" in text

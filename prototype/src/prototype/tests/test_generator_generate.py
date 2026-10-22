@@ -28,6 +28,62 @@ def settings():
     return GenerationSettings(contract_path="demo.yaml")
 
 
+@pytest.mark.parametrize('declaration', [
+    'import pytest\n@pytest.fixture\ndef api_client(): return object()\n',
+    'import pytest as pt\n@pt.fixture()\ndef base_url(): return "http://other"\n',
+    'from pytest import fixture as fx\n@fx(name="api_client")\ndef replacement(): return object()\n',
+    'import pytest\nclass TestApi:\n    @pytest.fixture\n    def base_url(self): return "http://other"\n',
+])
+def test_generated_modules_cannot_define_custom_fixtures(declaration):
+    code = declaration + '\ndef test_http(base_url, api_client):\n    assert True\n'
+    model = FakeModel(json.dumps({'files': [{'name': 'test_http.py', 'code': code}]}))
+    result = generate_suite(CONTRACT, settings(), model=model)
+    assert not result['prepared']
+    assert 'custom pytest fixtures' in result['errors'][0]
+
+
+def test_helpers_and_parametrization_preserve_trusted_fixture_use():
+    code = ('import pytest\ndef assert_body(body):\n    assert isinstance(body, list)\n'
+            '@pytest.mark.parametrize("path", ["/catalogue", "/tags"])\n'
+            'def test_http(base_url, api_client, path):\n'
+            '    response = api_client.get(base_url + path)\n'
+            '    assert response.status_code == 200\n')
+    result = generate_suite(CONTRACT, settings(), model=FakeModel(json.dumps({
+        'files': [{'name': 'test_http.py', 'code': code}]})))
+    assert not result['errors'] and result['prepared'][0].code == code
+
+
+@pytest.mark.parametrize("code", [
+    GOOD + GOOD,
+    "class TestApi:\n    def test_x(self): assert True\n    def test_x(self): assert False\n",
+    "class TestApi:\n    def test_x(self): assert True\nclass TestApi:\n    def test_y(self): assert True\n",
+])
+def test_duplicate_definitions_cannot_silently_remove_tests(code):
+    result = generate_suite(CONTRACT, settings(), model=FakeModel(json.dumps({
+        "files": [{"name": "test_api.py", "code": code}]})))
+    assert not result["prepared"]
+    assert "duplicate test definitions" in result["errors"][0]
+
+
+def test_same_test_name_in_different_classes_is_valid():
+    code = "class TestA:\n    def test_x(self): assert True\nclass TestB:\n    def test_x(self): assert True\n"
+    result = generate_suite(CONTRACT, settings(), model=FakeModel(json.dumps({
+        "files": [{"name": "test_api.py", "code": code}]})))
+    assert not result["errors"] and result["prepared"]
+
+
+@pytest.mark.parametrize("code", [
+    'def test_boundary_empty(base_url, api_client):\n    "Not applicable"\n    pass\n',
+    'def test_placeholder():\n    ...\n',
+    'class TestApi:\n    def test_placeholder(self):\n        "Only explanation"\n',
+])
+def test_empty_placeholders_cannot_masquerade_as_generated_scenarios(code):
+    result = generate_suite(CONTRACT, settings(), model=FakeModel(json.dumps({
+        "files": [{"name": "test_api.py", "code": code}]})))
+    assert not result["prepared"]
+    assert "empty test placeholders" in result["errors"][0]
+
+
 def test_request_usage_reads_usage_metadata():
     assert request_usage(SimpleNamespace(usage_metadata={"input_tokens": 1, "output_tokens": 2})) == (1, 2, 3)
     assert request_usage(SimpleNamespace(usage_metadata=None)) == (0, 0, 0)
@@ -118,6 +174,29 @@ def test_generate_suite_sends_system_and_user_messages():
     assert [msg["role"] for msg in model.messages] == ["system", "user"]
     assert "Операции:" in model.messages[1]["content"]
 
+def test_generate_suite_passes_response_contract_to_model():
+    contract = {'paths': {'/items': {'get': {'responses': {'200': {
+        'schema': {'$ref': '#/definitions/Item'}}}}}}, 'definitions': {
+        'Item': {'type': 'object', 'required': ['price'], 'properties': {
+            'price': {'type': 'number'}, 'labels': {'type': 'array', 'items': {'type': 'string'}}}}}}
+    model = FakeModel(json.dumps({'files': [{'name': 'test_a.py', 'code': GOOD}]}))
+    result = generate_suite(contract, settings(), model=model)
+    assert result['errors'] == ()
+    context = model.messages[1]['content']
+    assert 'price*:number' in context
+    assert 'required=["price"]' in context
+    assert 'labels:array[string]' in context
+
+def test_invalid_generation_context_does_not_call_model():
+    model = FakeModel('unused')
+    contract = {'paths': {'/items': {'get': {'responses': {'200': {
+        'schema': {'$ref': '#/definitions/Missing'}}}}}}}
+    result = generate_suite(contract, settings(), model=model)
+    assert result['prepared'] == ()
+    assert result['calls'] == 0
+    assert model.messages is None
+    assert '$ref' in result['errors'][0]
+
 
 def test_generation_output_requires_non_empty_files():
     from pydantic import ValidationError
@@ -126,3 +205,13 @@ def test_generation_output_requires_non_empty_files():
 
     with pytest.raises(ValidationError):
         GenerationOutput.model_validate_json('{"files": []}')
+
+
+def test_invalid_context_is_rejected_before_provider_initialization(monkeypatch):
+    import prototype.llm.model as provider
+    monkeypatch.setattr(provider, "build_model", lambda: pytest.fail("Invalid context must not initialize LLM"))
+    contract = {"paths": {"/items": {"get": {"responses": {"200": {
+        "schema": {"$ref": "#/definitions/Missing"}}}}}}}
+    result = generate_suite(contract, settings())
+    assert result["calls"] == 0 and not result["prepared"]
+    assert "$ref" in result["errors"][0]

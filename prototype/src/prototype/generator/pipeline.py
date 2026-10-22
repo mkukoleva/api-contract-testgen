@@ -33,7 +33,7 @@ from ..service_tools.runner.contracts import (
     TestOutcome,
 )
 from .contracts import GenerationRun, GenerationSettings, RepairAttempt
-from .generate import generate_suite
+from .generate import generate_suite, _custom_fixtures, _duplicate_tests, _empty_tests
 from .repair import apply_repair, classify_result, repair_call, supported_repair
 from ..reports.recommendations import build_recommendations
 from .prompts import prompt_versions
@@ -149,6 +149,14 @@ def _save_report(run: GenerationRun, settings: GenerationSettings) -> Generation
     A failed write is recorded as a generator error instead of being raised,
     keeping the pipeline's verdict usable while staying honest about the audit.
     """
+    from .scenarios import category_evidence
+    run = replace(run, category_evidence=category_evidence(
+        run.provenance.get("scenario_plan", {}), run.run_result))
+    if run.status == "success" and run.category_evidence["status"] == "incomplete":
+        missing = [f"{row['operation']}: {kind}" for row in run.category_evidence['operations']
+                   for kind, evidence in row['categories'].items() if evidence['status'] == 'missing']
+        run = replace(run, status="incomplete_categories",
+            generator_errors=(*run.generator_errors, "Missing required test categories: " + "; ".join(missing)))
     try:
         paths = save_generation_report(run, _run_dir(settings))
     except Exception as exc:  # report is auxiliary; the run result must survive
@@ -240,6 +248,11 @@ def run_generation_pipeline(
             json.dumps(source_context, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         settings = replace(settings, contract_path=Path(provenance["contract"]["snapshot_path"]),
                            input_document=document, source_context=source_context)
+        if settings.user_story_path is not None:
+            from .stories import load_user_story
+            provenance["user_story"] = load_user_story(settings.user_story_path, contract)
+            (run_dir / "inputs" / "user-story.json").write_text(
+                json.dumps(provenance["user_story"], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except (OSError, ValueError, UnicodeError) as exc:
         return early_failure(f"loading contract failed: {exc}")
 
@@ -278,10 +291,20 @@ def run_generation_pipeline(
 
     try:
         generated = generate_suite(contract, settings, model=model,
-                                   schemathesis_context=schemathesis_context)
+                                   schemathesis_context=schemathesis_context,
+                                   user_story=provenance.get("user_story"))
     except KeyboardInterrupt:
         return early_failure("generation interrupted by caller", "interrupted")
     gen_input, gen_output, gen_total = generated["tokens"]
+    provenance["scenario_plan"] = generated.get("scenario_plan", {})
+    provenance["transport_fixes"] = generated.get("transport_fixes", [])
+    if generated.get("user_story") is not None:
+        provenance["user_story"] = generated["user_story"]
+        try:
+            (run_dir / "inputs" / "user-story.json").write_text(
+                json.dumps(generated["user_story"], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except OSError as exc:
+            return early_failure(f"saving user story failed: {exc}", "infrastructure_error")
     generator_errors = list(generated["errors"])
     prepared: list[PreparedFile] = list(generated["prepared"])
 
@@ -337,6 +360,7 @@ def run_generation_pipeline(
             artifact_failed = True
             generator_errors.append(f"save attempt {index} failed: {exc}")
 
+    provenance["input_coverage_history"] = []
     save_attempt(0, files_map)
 
     attempt_index = 0
@@ -347,6 +371,8 @@ def run_generation_pipeline(
     final_run: RunResult | None = None
     status = "completed_with_failures"
     repeat_key: tuple[str, str] | None = None
+    coverage_calls = 0
+    protected_files = set()
 
     while True:
         attempt_dir = run_dir / f"attempt-{attempt_index}"
@@ -384,7 +410,7 @@ def run_generation_pipeline(
         environmental.extend(plan.environmental)
         repairable = []
         for target in plan.targets:
-            if target.file not in files_map:
+            if target.file not in files_map or target.file in protected_files:
                 continue
             if supported_repair(files_map[target.file], target):
                 repairable.append(target)
@@ -393,6 +419,37 @@ def run_generation_pipeline(
 
         if not repairable:
             status = _derive_status(run)
+            if status == "success" and settings.base_url:
+                from .input_coverage import input_coverage, supplement
+                coverage = input_coverage(contract, run.to_dict())
+                provenance["input_coverage"] = coverage
+                provenance["input_coverage_history"].append(coverage)
+                if coverage["status"] in ("incomplete", "unavailable"):
+                    status = "incomplete_inputs"
+                    if coverage["status"] == "unavailable":
+                        generator_errors.append("Input coverage unavailable: trusted JSON request evidence is missing")
+                        break
+                    if coverage_calls >= settings.max_coverage_attempts or used_output >= settings.repair_token_budget:
+                        generator_errors.append("Input coverage incomplete: supplementation limit reached")
+                        break
+                    additions, tokens, error = supplement(model, contract, coverage, files_map)
+                    coverage_calls += 1
+                    used_output += tokens[1]
+                    repair_input += tokens[0]
+                    repair_total += tokens[2]
+                    provenance["coverage_calls"] = coverage_calls
+                    if error:
+                        generator_errors.append("Input supplementation failed: " + error)
+                        break
+                    if used_output > settings.repair_token_budget:
+                        generator_errors.append("Input supplementation exceeded output token budget")
+                        break
+                    protected_files.update(files_map)
+                    files_map = {**files_map, **additions}
+                    attempt_index += 1
+                    save_attempt(attempt_index, files_map, {"supplemented": list(additions)})
+                    repeat_key = None
+                    continue
             break
 
         if repeat_key is not None and any(
@@ -448,8 +505,16 @@ def run_generation_pipeline(
             break
 
         try:
-            files_map = apply_repair(files_map, target, call.code)
-            save_attempt(attempts_used, files_map, {"repaired": target.identifier()})
+            candidate = apply_repair(files_map, target, call.code)
+            for name, code in candidate.items():
+                if _custom_fixtures(code):
+                    raise ValueError(f"{name}: repair defines custom pytest fixtures; use trusted base_url and api_client")
+                if _duplicate_tests(code):
+                    raise ValueError(f"{name}: repair contains duplicate test definitions")
+                if _empty_tests(code):
+                    raise ValueError(f"{name}: repair contains empty test placeholders")
+            files_map = candidate
+            save_attempt(attempt_index + 1, files_map, {"repaired": target.identifier()})
         except Exception as exc:
             entry["outcome"] = "error"
             entry["message"] = str(exc)
@@ -462,6 +527,13 @@ def run_generation_pipeline(
 
     expected = _expected_cases(files_map)
     run_result_dict = final_run.to_dict() if final_run is not None else None
+    if status == "success" and provenance.get("user_story"):
+        from .stories import check_story_code
+        problem = check_story_code(tuple(prepare_file(name, code) for name, code in files_map.items()),
+                                   provenance["user_story"])
+        if problem:
+            generator_errors.append(problem)
+            status = "generation_error"
     if artifact_failed:
         status = "infrastructure_error"
     elif status == "success" and generated["errors"]:

@@ -330,6 +330,28 @@ def test_repair_call_builds_compact_payload_and_reads_usage():
     assert "def test_item_by_id" in user
 
 
+@pytest.mark.parametrize('kind', ['file', 'function'])
+def test_catalogue_repair_handles_context_exceeding_repair_budget(kind):
+    from pathlib import Path
+    from prototype.generator.context import load_contract, render_contract_for_generation
+    from prototype.generator.repair import _contract_fragment_for
+    contract = load_contract(Path(__file__).resolve().parents[4] /
+                             'benchmark/catalogue/catalogue.swagger.json')
+    contract["paths"]["/catalogue"]["get"]["summary"] = "Описание каталога " * 100
+    assert len(render_contract_for_generation(contract)) > 1500
+    code = 'def test_item():\n    assert True\n'
+    target = RepairTarget(kind=kind, file='test_catalogue.py', function_path=('test_item',))
+    configured = settings(contract_fragment_chars=1500)
+    fragment = _contract_fragment_for(contract, configured, target, code)
+    assert len(fragment) <= 1500
+    assert 'GET /catalogue' in fragment
+    assert 'обрезано' in fragment
+    class FakeModel:
+        def invoke(self, messages):
+            return SimpleNamespace(content=code, usage_metadata={})
+    assert repair_call(FakeModel(), configured, contract, target, code).ok
+
+
 def test_repair_call_reports_invalid_output_without_raising():
     class BrokenModel:
         def invoke(self, messages):

@@ -345,7 +345,7 @@ def test_core_cli_url_is_fetched_once_and_source_reaches_fixed_tool_settings(sch
     metadata = json.loads(next((tmp_path / "reports").rglob("run-metadata.json")).read_text(encoding="utf-8"))
     assert metadata["contract"]["file"] == url + "/schema"
     assert metadata["source_code"]["provided"] is True
-    report = json.loads(Path(model.tool_results[0]["report_paths"]["json"]).read_text(encoding="utf-8"))
+    report = json.loads(next((tmp_path / "reports").rglob("generation-report.json")).read_text(encoding="utf-8"))
     assert report["provenance"]["source_code"] == metadata["source_code"]
     assert report["provenance"]["contract"]["sha256"] == hashlib.sha256(body).hexdigest()
 
@@ -368,12 +368,19 @@ def test_url_and_source_through_real_agent_docker_storage_report_and_replay(sche
         "--base-url", "http://catalogue:8080", "--network", "pytest-runner-catalogue_runner",
         "--blocked-network", "pytest-runner-catalogue_database",
         "--report-dir", str(tmp_path / "reports"), "--tests-output-dir", str(tmp_path / "saved")])
-    prototype.main()
-    data = model.tool_results[0]
-    assert data["pipeline_status"] == "success", data
+    # URL/source plumbing succeeds; the intentionally partial scripted suite
+    # must still expose missing categories through the primary CLI.
+    with pytest.raises(SystemExit) as incomplete:
+        prototype.main()
+    assert incomplete.value.code == 1
+    report = json.loads(next((tmp_path / "reports").rglob("generation-report.json")).read_text(encoding="utf-8"))
+    data = {**report, "pipeline_status": report["status"], "summary": report["pytest"]["summary"]}
+    assert data["pipeline_status"] == "incomplete_categories", data
+    assert report['category_evidence']['status'] == 'incomplete'
+    assert report['pytest']['exit_code'] == 0
+    assert any('Missing required test categories' in error for error in report['generator_errors'])
     assert data["attempts"] == 1 and data["summary"]["passed"] == 1
     assert requests == ["/schema"]
-    report = json.loads(Path(data["report_paths"]["json"]).read_text(encoding="utf-8"))
     identity = report["provenance"]["contract"]
     assert identity["operation_count"] == 4 and identity["file"] == url + "/schema"
     assert identity["sha256"] == hashlib.sha256(body).hexdigest()
@@ -382,5 +389,5 @@ def test_url_and_source_through_real_agent_docker_storage_report_and_replay(sche
     replay = run_tests(RunConfig(saved, tmp_path / "replay", base_url="http://catalogue:8080"),
                        network="pytest-runner-catalogue_runner", blocked_networks=("pytest-runner-catalogue_database",))
     assert replay.status == "completed" and replay.exit_code == 0, replay.to_dict()
-    assert model.calls == ["agent-tool", "generate", "repair", "agent-final"]
+    assert model.calls == ["agent-tool", "generate", "repair"]
     assert requests == ["/schema"]  # Replay needs neither contract download nor model.

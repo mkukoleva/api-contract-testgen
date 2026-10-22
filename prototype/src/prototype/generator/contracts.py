@@ -94,6 +94,7 @@ class GenerationSettings:
             ENV_REPAIR_TOKEN_BUDGET, DEFAULT_REPAIR_TOKEN_BUDGET
         )
     )
+    max_coverage_attempts: int = field(default_factory=lambda: _env_positive_int("TESTGEN_MAX_COVERAGE_ATTEMPTS", 2))
     test_fragment_lines: int = DEFAULT_TEST_FRAGMENT_LINES
     contract_fragment_chars: int = DEFAULT_CONTRACT_FRAGMENT_CHARS
     diagnostic_chars: int = DEFAULT_DIAGNOSTIC_CHARS
@@ -110,6 +111,7 @@ class GenerationSettings:
     enrich_with_schemathesis: bool = True
     schemathesis_service_url: str | None = None
     schemathesis_timeout_seconds: float = DEFAULT_SCHEMATHESIS_TIMEOUT_SECONDS
+    user_story_path: Path | str | None = None
     input_document: ContractDocument | None = field(default=None, repr=False, compare=False)
     source_context: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
@@ -119,6 +121,8 @@ class GenerationSettings:
         )
         if self.source_code_path is not None:
             object.__setattr__(self, "source_code_path", _str_path(self.source_code_path, "source_code_path"))
+        if self.user_story_path is not None:
+            object.__setattr__(self, "user_story_path", _str_path(self.user_story_path, "user_story_path"))
         if self.model is not None and not isinstance(self.model, str):
             raise ValueError("model must be a string or None")
         if self.base_url is not None:
@@ -137,6 +141,7 @@ class GenerationSettings:
             object.__setattr__(
                 self, "output_root", _str_path(self.output_root, "output_root")
             )
+        _non_negative_int(self.max_coverage_attempts, "max_coverage_attempts")
         timeout = self.runner_timeout_seconds
         if (
             isinstance(timeout, bool)
@@ -240,6 +245,7 @@ class GenerationRun:
     # Additive provenance; metrics and existing consumer fields are unchanged.
     provenance: dict[str, Any] = field(default_factory=dict)
     recommendations: dict[str, Any] = field(default_factory=dict)
+    category_evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -264,4 +270,5 @@ class GenerationRun:
             "report_paths": self.report_paths,
             "provenance": self.provenance,
             "recommendations": self.recommendations,
+            "category_evidence": self.category_evidence,
         }

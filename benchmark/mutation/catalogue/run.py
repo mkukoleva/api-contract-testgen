@@ -239,14 +239,39 @@ def main():
     parser.add_argument('--build', action='store_true')
     parser.add_argument('--workers', type=int, default=4, choices=range(1, 5))
     args = parser.parse_args()
+    report = run_catalogue(tests=args.tests, output_dir=args.output_dir,
+                          timeout=args.timeout, workers=args.workers, build=args.build)
+    print(json.dumps({'status': report['status'], 'metrics': report['metrics'], 'report_dir': report['report_dir']}, indent=2))
+    return 0 if report['status'] == 'completed' else 1
+
+
+def run_catalogue(*, tests, output_dir, timeout=60, workers=4, build=True):
+    """Run the isolated campaign and restore the caller's Docker configuration."""
+    from types import SimpleNamespace
+    if workers not in range(1, 5):
+        raise ValueError('workers must be between 1 and 4')
+    args = SimpleNamespace(tests=Path(tests), output_dir=Path(output_dir),
+                           timeout=timeout, workers=workers, build=build)
+    previous = {key: os.environ.get(key) for key in ('DOCKER_CONFIG', 'DOCKER_HOST')}
+    try:
+        return _run_catalogue(args)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _run_catalogue(args):
     if not math.isfinite(args.timeout) or args.timeout <= 0:
-        parser.error('timeout must be finite and positive')
+        raise ValueError('timeout must be finite and positive')
     tests = args.tests.resolve()
     if not tests.is_dir():
-        parser.error('tests must be an existing directory')
+        raise ValueError('tests must be an existing directory')
     output = args.output_dir.resolve()
     if output.is_relative_to(tests) or tests.is_relative_to(output):
-        parser.error('Tests and output must be separate, non-nested directories')
+        raise ValueError('Tests and output must be separate, non-nested directories')
     output.mkdir(parents=True, exist_ok=True)
     contract = convert(CONTRACT)
     session = output / ('session-' + uuid4().hex[:10])
@@ -291,8 +316,7 @@ def main():
     (session / 'original-responses.json').write_text(json.dumps({'stable': integrity['stable'], 'comparison': 'Exact except tag/tags string-array order; duplicates retained', 'responses': originals}, indent=2))
     (session / 'provenance.json').write_text(json.dumps({'image_id': image, 'contract_source': str(CONTRACT),
         'tests_source': str(tests), 'timeout': args.timeout, 'workers': args.workers, 'report_dir': report['report_dir']}, indent=2))
-    print(json.dumps({'status': report['status'], 'metrics': report['metrics'], 'report_dir': report['report_dir']}, indent=2))
-    return 0 if report['status'] == 'completed' else 1
+    return report
 
 
 if __name__ == '__main__': raise SystemExit(main())

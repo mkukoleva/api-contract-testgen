@@ -558,6 +558,7 @@ def _generation_result(run) -> dict[str, Any]:
         "attempts": run.attempts,
         "tokens": run.to_dict()["tokens"],
         "summary": (run.run_result or {}).get("summary", {}),
+        "runner_status": (run.run_result or {}).get("status"),
         "runnability": run.runnability,
         "repair_log": [attempt.to_dict() for attempt in run.repair_log],
         "suspected_defects": list(run.suspected_defects),
@@ -566,6 +567,7 @@ def _generation_result(run) -> dict[str, Any]:
         "generator_errors": list(run.generator_errors),
         "report_paths": run.report_paths,
         "recommendations": run.recommendations,
+        "category_evidence": run.category_evidence,
     }
 
 
@@ -573,7 +575,7 @@ def _compact_generation_result(full):
     from ..selection import _clip
     compact = dict(full)
     fields = ("runnability", "repair_log", "suspected_defects", "environmental", "saved_versions",
-              "generator_errors", "recommendations")
+              "generator_errors", "recommendations", "category_evidence")
     changed = []
     for field in fields:
         if field not in full:
@@ -582,9 +584,10 @@ def _compact_generation_result(full):
         if compact[field] != full[field]:
             changed.append(field)
     if len(json.dumps(compact, ensure_ascii=False)) > 5600:
-        for field in ("suspected_defects", "environmental", "repair_log", "generator_errors", "recommendations"):
+        for field in ("category_evidence", "suspected_defects", "environmental", "repair_log", "generator_errors", "recommendations"):
             if compact.get(field):
-                compact[field] = {} if field == "recommendations" else []
+                compact[field] = ({"status": full[field].get("status"), "details_in_report": True}
+                                  if field == "category_evidence" else {} if field == "recommendations" else [])
                 if field not in changed:
                     changed.append(field)
             if len(json.dumps(compact, ensure_ascii=False)) <= 5600:

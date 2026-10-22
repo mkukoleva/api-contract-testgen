@@ -422,6 +422,7 @@ def test_save_writes_version_with_manifest(tmp_path, monkeypatch):
         "path": str(CONTRACT),
         "sha256": hashlib.sha256(CONTRACT.read_bytes()).hexdigest(),
         "title": "Demo Catalogue API",
+        "version": "1.0.0",
         "slug": "demo-catalogue-api",
     }
     assert manifest["generator"] == {"model": "deepseek", "meta": {"prompt": "v1"}}
@@ -659,3 +660,19 @@ def test_project_pytest_does_not_collect_saved_versions(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "src/prototype/tests/test_own.py::test_own" in result.stdout
     assert "generated" not in result.stdout
+
+
+@pytest.mark.parametrize('extension,text,expected', [
+    ('json', '{"info":{"title":"API","version":"2.3"}}', '2.3'),
+    ('yaml', 'info:\n  title: API\n  version: "2.4"\n', '2.4'),
+    ('json', '{"info":{"title":"API"}}', None),
+])
+def test_direct_storage_preserves_declared_version_without_provenance(tmp_path, extension, text, expected):
+    from prototype.storage import SaveRequest, GeneratedFile, save_test_suite
+    contract_path = tmp_path / ('contract.' + extension)
+    contract_path.write_text(text)
+    saved = save_test_suite(SaveRequest(contract_path=contract_path,
+        files=(GeneratedFile('test_api.py', 'def test_api(): assert True\n'),),
+        output_root=tmp_path / 'saved', collect=False))
+    assert saved.manifest['contract']['version'] == expected
+    assert saved.manifest['contract']['sha256'] == hashlib.sha256(contract_path.read_bytes()).hexdigest()

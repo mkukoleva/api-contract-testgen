@@ -377,6 +377,56 @@ def test_repeat_and_recovery_required(fault):
     if fault == 'recovery_failed': recovery = observation(outcome='failed')
     assert classify_result(PLAN, attempts, recovery, EXPECTED)[0] == 'inconclusive'
 
+@pytest.mark.parametrize('kind', ['key_error', 'type_error'])
+@pytest.mark.parametrize('fault', [None, 'one_attempt', 'different_failure', 'different_kind',
+    'passing_repeat', 'recovery_failed', 'no_delivery', 'wrong_recipient', 'setup', 'no_signature'])
+def test_recipient_exceptions_require_confirmation(kind, fault):
+    run = observation(PLAN, outcome='failed')
+    run = replace(run, cases=(replace(run.cases[0], failure_kind=kind,
+                                     failure_signature=f'test_api.py:10:{kind}'),))
+    attempts, recovery = [run, run], observation()
+    if fault == 'one_attempt': attempts.pop()
+    elif fault == 'different_failure':
+        attempts[1] = replace(run, cases=(replace(run.cases[0], failure_signature='elsewhere'),))
+    elif fault == 'different_kind':
+        attempts[1] = replace(run, cases=(replace(run.cases[0], failure_kind='assertion'),))
+    elif fault == 'passing_repeat': attempts[1] = observation(PLAN)
+    elif fault == 'recovery_failed': recovery = observation(outcome='failed')
+    elif fault == 'no_delivery': attempts = [replace(run, deliveries=())] * 2
+    elif fault == 'wrong_recipient':
+        other = 'test_api.py::other'
+        run = replace(run, collected_nodeids=(*EXPECTED, other),
+                      cases=(*run.cases, CaseObservation(other, 'passed')),
+                      deliveries=(replace(run.deliveries[0], nodeid=other),))
+        attempts = [run, run]
+        recovery = replace(observation(), collected_nodeids=(*EXPECTED, other),
+                           cases=(*observation().cases, CaseObservation(other, 'passed')))
+    elif fault == 'setup': attempts = [replace(run, cases=(replace(run.cases[0], phase='setup'),))] * 2
+    elif fault == 'no_signature':
+        attempts = [replace(run, cases=(replace(run.cases[0], failure_signature=None),))] * 2
+    expected = run.collected_nodeids
+    verdict, reason = classify_result(PLAN, attempts, recovery, expected)
+    assert verdict == ('killed' if fault is None else 'inconclusive')
+    if fault == 'wrong_recipient': assert 'other than' in reason
+    if fault == 'no_signature': assert 'stable signature' in reason
+
+@pytest.mark.parametrize('kind', ['key_error', 'type_error'])
+def test_exception_campaign_runs_repeat_and_recovery(tmp_path, kind):
+    calls = []
+    def execute(plan, directory):
+        calls.append(directory.name)
+        run = observation(plan, outcome='failed' if plan else 'passed')
+        return replace(run, cases=(replace(run.cases[0], failure_kind=kind,
+                       failure_signature='test_api.py:10:' + kind),)) if plan else run
+    report = run_mutation_campaign(CONTRACT, execute=execute, fingerprint=lambda: 'stable', output_dir=tmp_path)
+    assert report['status'] == 'completed'
+    assert report['run_count'] == 25
+    assert report['metrics']['counts']['killed'] == 8
+    for row in report['results']:
+        assert len(row['attempts']) == 2
+        assert row['recovery']['exit_code'] == 0
+        assert row['recovery']['deliveries'] == ()
+
 def test_metrics_have_distinct_denominators():
     rows = [{'status': s} for s in ['killed'] * 6 + ['survived'] * 2 + ['not_exercised'] * 2
             + ['invalid', 'unsupported']]
@@ -533,7 +583,9 @@ def test_compact_adapter_build_includes_all_runtime_files(tmp_path, monkeypatch)
     assert 'mutation_validation.py' not in dockerfile
     assert 'pytest_capture.py' not in dockerfile
 
-def test_combined_worker_records_collection_and_assertion_failure(tmp_path, monkeypatch):
+@pytest.mark.parametrize('exception,kind', [(AssertionError, 'assertion'), (KeyError, 'key_error'),
+                                         (TypeError, 'type_error'), (RuntimeError, 'other')])
+def test_combined_worker_records_collection_and_failure(tmp_path, monkeypatch, exception, kind):
     # Load the observer definitions without starting the Docker-only base worker.
     import ast
     import types
@@ -550,8 +602,8 @@ def test_combined_worker_records_collection_and_assertion_failure(tmp_path, monk
     observer.pytest_runtest_logstart(item.nodeid, None)
     assert json.loads((tmp_path / 'context.json').read_text())['phase'] == 'setup'
     report = types.SimpleNamespace(outcome='failed', when='call', failed=True, longrepr='bad response')
-    error = types.SimpleNamespace(errisinstance=lambda cls: cls is AssertionError,
-        traceback=[types.SimpleNamespace(path='test_api.py', lineno=12)], typename='AssertionError')
+    error = types.SimpleNamespace(errisinstance=lambda cls: cls is exception,
+        traceback=[types.SimpleNamespace(path='test_api.py', lineno=12)], typename=exception.__name__)
     hook = observer.pytest_runtest_makereport(item, types.SimpleNamespace(excinfo=error))
     next(hook)
     with pytest.raises(StopIteration):
@@ -559,8 +611,41 @@ def test_combined_worker_records_collection_and_assertion_failure(tmp_path, monk
     observer.pytest_sessionfinish(None, 1)
     result = json.loads((tmp_path / 'observation.json').read_text())
     assert result['collected_nodeids'] == [item.nodeid]
-    assert result['cases'][0]['failure_kind'] == 'assertion'
+    assert result['cases'][0]['failure_kind'] == kind
     assert result['exit_code'] == 1
+
+@pytest.mark.parametrize('body,kind', [('{}', 'key_error'), ('"changed"', 'type_error')])
+def test_real_pytest_observer_confirms_recipient_exception(tmp_path, body, kind):
+    import os
+    import subprocess
+    # Exercise actual pytest exception/traceback objects, not mocked hooks.
+    (tmp_path / 'observer.py').write_text((HERE / 'worker.py').read_text().split('"""Overlay only:')[0])
+    (tmp_path / 'test_api.py').write_text(
+        'import json, os\n'
+        'def test_item():\n'
+        '    body = json.loads(os.environ["TEST_RESPONSE"])\n'
+        '    assert body["size"] == 9\n')
+    def execute(label, changed):
+        destination = tmp_path / label
+        destination.mkdir()
+        env = {**os.environ, 'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1', 'PYTHONPATH': str(tmp_path),
+               'TEST_RESPONSE': body if changed else '{"size": 9}',
+               'MUTATION_CONTEXT': str(destination / 'context.json'),
+               'MUTATION_OBSERVATION': str(destination / 'observation.json')}
+        completed = subprocess.run([sys.executable, '-m', 'pytest', '-p', 'observer',
+            '-q', '-p', 'no:cacheprovider', 'test_api.py'], cwd=tmp_path, env=env,
+            capture_output=True, text=True, timeout=30)
+        data = json.loads((destination / 'observation.json').read_text())
+        assert completed.returncode == (1 if changed else 0), completed.stdout + completed.stderr
+        return SuiteObservation(data['status'], data['exit_code'], tuple(data['collected_nodeids']),
+            tuple(CaseObservation(**c) for c in data['cases']),
+            (DeliveryEvidence(PLAN.mutant_id, EXPECTED[0], 'call', True, True),) if changed else (),
+            'ready' if changed else None, tuple(data['diagnostics']))
+    baseline = execute('baseline', False)
+    assert baseline.cases[0].outcome == 'passed'
+    attempts = [execute('first', True), execute('repeat', True)]
+    assert all(a.cases[0].failure_kind == kind for a in attempts)
+    assert classify_result(PLAN, attempts, execute('recovery', False), EXPECTED)[0] == 'killed'
 
 @pytest.mark.parametrize('failure', ['build', 'wrong_base'])
 def test_pinned_base_tag_is_cleaned_on_build_failure(tmp_path, monkeypatch, failure):

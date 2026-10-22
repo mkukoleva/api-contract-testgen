@@ -147,6 +147,35 @@ def _markdown(payload: dict) -> str:
 
         lines.append("")
 
+    evidence = payload.get("category_evidence")
+    if evidence:
+        lines += ["## Категории по операциям (4.1.4.1)", "", _text(evidence["scope"]), "",
+                  "Статус выполнения pytest выше не означает полноту категорий или приёмку по ТЗ.", "",
+                  "| Операция | normal | boundary | error |", "|---|---|---|---|"]
+        for row in evidence["operations"]:
+            lines.append("| " + " | ".join([_text(row["operation"]),
+                *(_text(row["categories"][kind]["status"]) for kind in ("normal", "boundary", "error"))]) + " |")
+        lines += ["", "observed — есть успешный тест с HTTP-наблюдением; missing — категория не подтверждена; "
+                  "needs_contract_clarification — ожидание не определено контрактом; unavailable — нет полных данных.", ""]
+
+    coverage = (payload.get("provenance") or {}).get("input_coverage")
+    if coverage:
+        lines += ["## Фактические входные условия", "", _text(coverage["scope"]), "",
+                  "Статус: " + _text(coverage["status"]), ""]
+        for row in coverage["operations"]:
+            lines.append("- " + _text(row["operation"]) + ": " + _text(row["status"])
+                         + ("; пропущены: " + _text(", ".join(row["missing"])) if row["missing"] else ""))
+        lines += [_text(item) for item in coverage["limitations"]]
+        lines.append("")
+
+    story = (payload.get("provenance") or {}).get("user_story")
+    if story:
+        lines += ["## Цепочечный сценарий", "", _text(story["story"]), "",
+                  "Ожидаемые шаги user story (фактический результат — в pytest):", ""]
+        for index, step in enumerate(story["steps"], 1):
+            lines.append(f"{index}. `{_text(step['endpoint'])}` — {_text(step['expected_result'])}")
+        lines += ["", f"Конечная цель: {_text(story['final_goal'])}", ""]
+
     summary = (
         payload.get("pytest") or {}
     ).get("summary")
@@ -209,7 +238,7 @@ def _markdown(payload: dict) -> str:
         )
 
         lines.append(
-            f"| HTTP-коды | "
+            f"| Пары операция + HTTP-код (статические проверки) | "
             f"{trace_summary.get('response_codes_total', 0)} | "
             f"{trace_summary.get('response_codes_covered', 0)} | "
             f"{_text(', '.join(trace_summary.get('response_codes_uncovered', [])) or '—')} |"
@@ -586,6 +615,7 @@ def save_generation_report(
             run.saved_versions
         ),
         "provenance": provenance,
+        "category_evidence": run.category_evidence,
     }
 
     json_text = (

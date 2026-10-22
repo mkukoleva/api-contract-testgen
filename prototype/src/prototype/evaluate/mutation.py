@@ -374,7 +374,7 @@ def _resolve_local(contract: dict, node: dict, path: tuple, seen: frozenset[str]
         if ref in seen:
             raise ValueError("Recursive $ref is unsupported")
         seen = seen | {ref}
-        parts = tuple(x.replace("~1", "/").replace("~0", "~") for x in ref[2:].split("/"))
+        parts = tuple(x.replace("~1", "/").replace("~0", "~") for x in unquote(ref[1:])[1:].split("/"))
         target: Any = contract
         for key in parts:
             if not isinstance(target, dict) or key not in target:
@@ -812,7 +812,7 @@ class CaseObservation:
     nodeid: str
     outcome: str  # passed, failed, error, skipped
     phase: str = "call"
-    failure_kind: str | None = None  # assertion, response_validation, other
+    failure_kind: str | None = None  # assertion, response_validation, key_error, type_error, other
     failure_signature: str | None = None  # stable location/type, not volatile text
     message: str = ""
 
@@ -886,9 +886,15 @@ def _attempt_verdict(plan: ResponseMutationPlan, run: SuiteObservation,
         return "survived", "Confirmed defect was delivered; the full suite passed"
     failures = [c for c in run.cases if c.outcome == "failed"]
     # Conservative attribution: a failure in some OTHER test is not enough.
-    if any(c.nodeid != delivery.nodeid or c.failure_kind not in {"assertion", "response_validation"}
-           or not c.failure_signature for c in failures):
-        return "inconclusive", "Failure is not attributable to the test receiving the changed response"
+    if any(c.nodeid != delivery.nodeid for c in failures):
+        return "inconclusive", "A test other than the changed response recipient failed"
+    if any(c.failure_kind not in {"assertion", "response_validation", "key_error", "type_error"}
+           for c in failures):
+        return "inconclusive", "Response recipient failed with an unsupported exception kind"
+    if any(not c.failure_signature for c in failures):
+        return "inconclusive", "Response recipient failure has no stable signature"
+    # KeyError/TypeError are candidates only: repetition and recovery below
+    # distinguish reproducible recipient failures from persistent test errors.
     return "killed", "Response recipient failed; repeat and recovery still required"
 
 

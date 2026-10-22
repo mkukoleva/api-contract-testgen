@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -36,10 +37,14 @@ class GenerationMetrics:
     contract_coverage_percent: float | None = None
 
     mutation_score_percent: float | None = None
+    mutation_status: str | None = None
+    mutation_reason: str | None = None
+    mutation_report_path: str | None = None
 
     runnable_tests: int | None = None
     total_generated_tests: int | None = None
     runnability_percent: float | None = None
+    runnability_reason: str | None = None
 
     tests_without_manual_edits: int | None = None
     tests_without_manual_edits_percent: float | None = None
@@ -80,7 +85,8 @@ def _extract_tool_results(
         if message.__class__.__name__ != "ToolMessage":
             continue
 
-        content = _extract_content(message)
+        artifact = getattr(message, "artifact", None)
+        content = artifact if isinstance(artifact, dict) else _extract_content(message)
 
         if isinstance(content, dict):
             tool_results.append(content)
@@ -212,6 +218,16 @@ def _extract_test_suite_size(
     if result is None:
         return None
 
+    if "summary" in result:
+        # Count final pytest cases, including parametrizations and all
+        # outcomes. Partial execution/collection cannot establish suite size.
+        summary = result["summary"]
+        total = summary.get("total") if isinstance(summary, dict) else None
+        if (result.get("runner_status") in {"completed", "no_tests"}
+                and type(total) is int and total >= 0):
+            return total
+        return None
+
     possible_fields = (
         "test_suite_size",
         "generated_tests",
@@ -241,12 +257,27 @@ def _extract_test_suite_size(
 def _extract_runnability(
     tool_results: list[dict[str, Any]],
     test_suite_size: int | None,
-) -> tuple[int | None, float | None]:
+) -> tuple[int | None, int | None, float | None]:
 
     result = _find_generation_result(tool_results)
 
     if result is None:
-        return None, None
+        return None, None, None
+
+    if "runnability" in result:
+        # Use evaluate.runnability's independent expected/ran nodeids. A
+        # failed assert counts as executed; passed/summary.total is different.
+        facts = result["runnability"]
+        if not isinstance(facts, dict):
+            return None, None, None
+        ran, total = facts.get("ran_total"), facts.get("expected_total")
+        if type(ran) is not int or type(total) is not int or not 0 <= ran <= total:
+            return None, None, None
+        percent = facts.get("runnability_percent")
+        if (total == 0 or facts.get("reason") or type(percent) not in (int, float)
+                or not math.isfinite(percent) or not 0 <= percent <= 100):
+            percent = None
+        return ran, total, percent
 
     runnable = result.get("runnable_tests")
 
@@ -269,13 +300,13 @@ def _extract_runnability(
         total = test_suite_size
 
     if runnable is None or total is None or total <= 0:
-        return None, None
+        return None, total, None
 
     runnable = max(0, min(runnable, total))
 
     percent = runnable / total * 100
 
-    return runnable, round(percent, 2)
+    return runnable, total, round(percent, 2)
 
 
 def _extract_manual_edit_metric(
@@ -423,7 +454,7 @@ def calculate_metrics(
         )
     )
 
-    runnable_tests, runnability = _extract_runnability(
+    runnable_tests, total_generated_tests, runnability = _extract_runnability(
         tool_results,
         test_suite_size,
     )
@@ -475,9 +506,12 @@ def calculate_metrics(
 
         runnable_tests=runnable_tests,
 
-        total_generated_tests=test_suite_size,
+        total_generated_tests=total_generated_tests,
 
         runnability_percent=runnability,
+        runnability_reason=(generation_result.get("runnability", {}).get("reason")
+                            if generation_result and isinstance(generation_result.get("runnability"), dict)
+                            else None),
 
         tests_without_manual_edits=tests_without_edits,
 
@@ -594,4 +628,10 @@ def format_metrics_markdown(
         "",
     ]
 
+    if metrics.mutation_status:
+        lines.append(f"Mutation testing: {metrics.mutation_status}.")
+        if metrics.mutation_reason:
+            lines.append(f"Причина/ограничение: {metrics.mutation_reason}")
+        if metrics.mutation_report_path:
+            lines.append(f"Отчёт кампании: {metrics.mutation_report_path}")
     return "\n".join(lines)

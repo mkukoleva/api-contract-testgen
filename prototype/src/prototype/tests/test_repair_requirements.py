@@ -77,7 +77,7 @@ def test_trusted_client_records_status_and_path_without_query_or_headers(monkeyp
                            headers={"Authorization": "Bearer secret"}).status_code == 404
     finally:
         fixture.close(); server.shutdown(); server.server_close(); thread.join(2)
-    assert seen == [{"method": "GET", "path": "/items", "status_code": 404}]
+    assert seen == [{"method": "GET", "path": "/items", "status_code": 404, "request_body": {"kind": "absent"}}]
 
 
 def test_worker_events_preserve_observations_without_changing_test_outcome(tmp_path):
@@ -147,7 +147,7 @@ def test_client_observes_only_target_and_normalizes_base_path(monkeypatch):
         session.get("http://api:8080/v10/items")
     finally:
         fixture.close()
-    assert seen == [{"method": "GET", "path": "/items", "status_code": 200}]
+    assert seen == [{"method": "GET", "path": "/items", "status_code": 200, "request_body": {"kind": "absent"}}]
 
 
 def test_truncated_repair_response_is_not_accepted_as_a_complete_candidate():

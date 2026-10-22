@@ -76,8 +76,8 @@ REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 PYTEST_SYSTEM_PROMPT = (
     "Ты — ядро агента запуска настроенного конвейера pytest. "
     "Вызови generate_tests_tool ровно один раз с пустыми аргументами. "
-    "Прочитай фактический результат инструмента и сообщи статус, "
-    "результаты pytest и пути отчётов. Не выдумывай успех при ошибке. "
+    "Результат инструмента завершает запуск; статус, результаты pytest "
+    "и пути отчётов выводит оркестратор. "
     "Адрес, сеть, лимиты и каталог задаёт доверенный оркестратор."
 )
 
@@ -122,11 +122,41 @@ def build_agent(*, generation_settings=None, testing_settings=None):
 
     if generation_settings is not None:
         from .service_tools.runner.tools import create_generation_tool
+        from langchain.agents.middleware import wrap_model_call
+        from langchain_core.messages import ToolMessage
+
+        @wrap_model_call
+        def retry_generation_arguments(request, handler):
+            response = handler(request)
+            calls = [call for message in response.result
+                     for call in getattr(message, "tool_calls", [])]
+            if not any(call["name"] == "generate_tests_tool" and call.get("args") != {}
+                       for call in calls):
+                return response
+            # Reject the whole proposed batch before execution. Ask once for
+            # a new call; never strip arguments or apply model-supplied policy.
+            feedback = [ToolMessage(
+                content="Call rejected; no tool executed. Call generate_tests_tool exactly once with args {}. Configuration is fixed by the orchestrator.",
+                tool_call_id=call["id"], status="error") for call in calls]
+            corrected = handler(request.override(
+                messages=[*request.messages, *response.result, *feedback]))
+            corrected_calls = [call for message in corrected.result
+                               for call in getattr(message, "tool_calls", [])]
+            if (len(corrected_calls) != 1 or corrected_calls[0]["name"] != "generate_tests_tool"
+                    or corrected_calls[0].get("args") != {}):
+                raise ValueError("Generation tool call still invalid after one correction; expected generate_tests_tool with args {}")
+            return corrected
+
+        generation_tool = create_generation_tool(generation_settings, model=model)
+        # The pipeline already performs generation, repair and reporting.
+        # A second agent completion can repeatedly call the cached tool.
+        generation_tool.return_direct = True
         return _record_model(create_agent(
             model=model,
-            tools=[create_generation_tool(generation_settings, model=model)],
+            tools=[generation_tool],
             system_prompt=PYTEST_SYSTEM_PROMPT,
-        ), model)
+            middleware=[retry_generation_arguments],
+        ).with_config(recursion_limit=8), model)
 
     return _record_model(create_agent(
         model=model,
@@ -236,7 +266,7 @@ def inspect_contract(contract_path: str, *, report_dir=None, source_code_path=No
 
 
 def run(contract_path: str, *, report_dir: Path | str | None = None, generation_settings=None,
-        source_code_path=None, testing_settings=None) -> int | None:
+        source_code_path=None, testing_settings=None, mutation_adapter=None) -> int | None:
     """
     Запустить полный цикл работы агента для одного API-контракта.
     """
@@ -250,11 +280,14 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
     from .parser.contract_input import normalize_location
     from dataclasses import replace
 
+    if mutation_adapter is not None and (mutation_adapter != 'catalogue' or generation_settings is None):
+        raise ValueError('Mutation evaluation requires generation and the catalogue adapter')
     print("[CORE] Читаю API-контракт...")
 
     source_path = source_code_path if source_code_path is not None else getattr(generation_settings, "source_code_path", None)
     document, source_context = _load_inputs(contract_path, source_path, report_dir)
     contract = summarize_contract(document.data, document.source)
+    user_story = None
     if generation_settings is not None:
         from .parser.contract import ContractInputError
         requested = normalize_location(contract_path)
@@ -265,6 +298,14 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
             same = requested == configured
         if not same:
             raise ContractInputError("Контракт CLI не соответствует доверенным настройкам генерации.")
+        if generation_settings.user_story_path is not None:
+            from .generator.stories import load_user_story
+            try:
+                user_story = load_user_story(generation_settings.user_story_path, document.data)
+            except (OSError, ValueError, UnicodeError) as exc:
+                error = ContractInputError(f"Не удалось загрузить user story: {exc}")
+                _report_input_error(error, report_dir)
+                raise error from exc
         generation_settings = replace(generation_settings, input_document=document, source_context=source_context)
     now = datetime.now(timezone.utc)
     report_root = Path(report_dir) if report_dir is not None else REPORTS_DIR
@@ -275,6 +316,9 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
                                    output_dir=run_dir / "tools")
     (run_dir / "inputs" / "source-context.json").write_text(
         json.dumps(source_context, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if user_story is not None:
+        (run_dir / "inputs" / "user-story.json").write_text(
+            json.dumps(user_story, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     print("[CORE] Контракт успешно прочитан:")
     print(
@@ -491,11 +535,25 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
             message = message.model_copy(update={"content": json.dumps(artifact, ensure_ascii=False)})
         metrics_messages.append(message)
     metrics_input["messages"] = metrics_messages
+    mutation_result = None
+    if mutation_adapter is not None:
+        from .evaluate.mutation_integration import evaluate_generated_suite
+        print('[MUTATION] Оценка последней сохранённой версии на изолированном Catalogue...')
+        generation = generation_results[0] if not agent_error and len(generation_results) == 1 else {}
+        mutation_result = evaluate_generated_suite(generation=generation, contract=document.data,
+            contract_sha256=identity['sha256'], output_dir=run_dir / 'mutation')
+        with report_path.open('a', encoding='utf-8') as file:
+            file.write('\n\n## Mutation testing\n\n' + json.dumps(mutation_result, ensure_ascii=False, indent=2) + '\n')
     metrics = calculate_metrics(
         agent_result=metrics_input,
         contract_summary=contract,
         generation_time_seconds=generation_time,
+        mutation_score_percent=mutation_result['mutation_score_percent'] if mutation_result else None,
     )
+    if mutation_result:
+        metrics.mutation_status = mutation_result['status']
+        metrics.mutation_reason = mutation_result['reason']
+        metrics.mutation_report_path = mutation_result['summary_path']
 
     metrics_json_path = save_metrics_report(
         metrics,
@@ -526,6 +584,8 @@ def run(contract_path: str, *, report_dir: Path | str | None = None, generation_
         f"{report_path}"
     )
     if generation_settings is not None:
+        if mutation_result and mutation_result['mutation_score_percent'] is None:
+            return 1
         return 0 if not agent_error and len(generation_results) == 1 and generation_results[0].get("pipeline_status") == "success" else 1
     if testing_settings is not None:
         return 0 if not agent_error and len(external_results) == 1 and external_results[0].get("status") == "completed" and external_results[0].get("success", True) else 1
@@ -551,6 +611,7 @@ def main() -> None:
 
     parser.add_argument(
         "contract",
+        nargs="?",
         help="Путь или HTTP(S) URL OpenAPI/Swagger-контракта.",
     )
     parser.add_argument(
@@ -558,8 +619,12 @@ def main() -> None:
         help="Каталог отчётов и метрик; поддерживается путь вне проекта.",
     )
     parser.add_argument("--generate", action="store_true", help="Генерация pytest и запуск через настроенный M3.")
+    parser.add_argument("--generation-unit", action="store_true",
+                        help="Создать и выполнить unit-тесты для --source-code; работает отдельно или после --generate.")
+    parser.add_argument('--mutation', choices=('catalogue',), help='После генерации оценить сохранённые тесты на изолированном Catalogue.')
     parser.add_argument("--inspect-contract", action="store_true", help="Разбор, статистика и снимок контракта без LLM.")
     parser.add_argument("--source-code", type=Path, help="Необязательный Python-файл или каталог исходников Python/FastAPI.")
+    parser.add_argument("--user-story", type=Path, help="JSON user story для генерации цепочечного pytest-теста; требует --generate.")
     parser.add_argument("--test-intent", choices=("quick", "deep", "mock", "multi"), help="Выбор инструмента: Schemathesis / EvoMaster / Microcks.")
     parser.add_argument("--tool-timeout", type=float, default=None, help="Лимит выбранного инструмента (по умолчанию 30 с).")
     parser.add_argument("--schemathesis-url", help="URL сервиса Schemathesis (по умолчанию http://127.0.0.1:8080).")
@@ -576,6 +641,17 @@ def main() -> None:
     parser.add_argument("--tests-output-dir", type=Path, help="Каталог сохранённых версий тестов для --generate.")
 
     args = parser.parse_args()
+    if args.mutation and not args.generate:
+        parser.error('--mutation требует --generate')
+    if args.user_story is not None and not args.generate:
+        parser.error("--user-story требует --generate")
+    unit_only = args.generation_unit and not args.generate
+    if args.generation_unit and args.source_code is None:
+        parser.error("--generation-unit требует --source-code")
+    if unit_only and (args.inspect_contract or args.test_intent or args.contract is not None):
+        parser.error("Самостоятельный --generation-unit используется без контракта и других режимов")
+    if not unit_only and args.contract is None:
+        parser.error("Для этого режима требуется контракт")
     if args.inspect_contract and args.generate:
         parser.error("--inspect-contract и --generate несовместимы")
     if args.test_intent and (args.generate or args.inspect_contract):
@@ -587,6 +663,28 @@ def main() -> None:
     generation_settings = None
     testing_settings = None
     from .parser.contract import ContractInputError
+    if unit_only:
+        if any(value is not None for value in (args.base_url, args.network,
+                args.max_repair_attempts, args.repair_token_budget, args.tests_output_dir)) or args.blocked_network:
+            parser.error("Unit-режим использует --report-dir и --runner-timeout; настройки HTTP и ремонта неприменимы")
+        from .generator.unit import validate_unit_source, run_unit_generation
+        from .service_tools.runner.contracts import RunConfig
+        try:
+            validate_unit_source(args.source_code)
+            timeout = 60 if args.runner_timeout is None else args.runner_timeout
+            RunConfig("pending-tests", "pending-results", timeout_seconds=timeout)
+            unit = run_unit_generation(args.source_code,
+                output_root=args.report_dir or Path.cwd() / ".unit-generation-runs",
+                timeout_seconds=timeout)
+        except (OSError, ValueError, SyntaxError, UnicodeError) as exc:
+            from .llm.diagnostics import describe_error
+            parser.error(describe_error(exc))
+        print(f"Unit generation: {unit['status']} {unit['summary_path']}")
+        if unit.get("error"):
+            print(unit["error"])
+        if unit["status"] != "passed":
+            raise SystemExit(1)
+        return
     if args.test_intent:
         from .service_tools.selection import ToolSettings
         try:
@@ -605,6 +703,12 @@ def main() -> None:
     elif args.generate:
         if not args.base_url or not args.network or not args.network.strip():
             parser.error("--generate требует --base-url и --network")
+        if args.generation_unit:
+            from .generator.unit import validate_unit_source
+            try:
+                validate_unit_source(args.source_code)
+            except (OSError, ValueError, SyntaxError, UnicodeError) as exc:
+                parser.error(str(exc))
         from .generator.contracts import GenerationSettings
         from .service_tools.runner.contracts import RunConfig
         overrides = {}
@@ -619,7 +723,7 @@ def main() -> None:
                 contract_path=args.contract, base_url=args.base_url, network=args.network,
                 blocked_networks=tuple(args.blocked_network), output_dir=args.report_dir,
                 output_root=args.tests_output_dir, runner_timeout_seconds=timeout,
-                source_code_path=args.source_code, **overrides)
+                source_code_path=args.source_code, user_story_path=args.user_story, **overrides)
         except ValueError as exc:
             if isinstance(exc, ContractInputError):
                 _report_input_error(exc, args.report_dir)
@@ -639,7 +743,18 @@ def main() -> None:
         elif args.inspect_contract:
             inspect_contract(args.contract, report_dir=args.report_dir, source_code_path=args.source_code)
         elif generation_settings is not None:
-            code = run(args.contract, report_dir=args.report_dir, generation_settings=generation_settings)
+            options = {'mutation_adapter': args.mutation} if args.mutation else {}
+            code = run(args.contract, report_dir=args.report_dir, generation_settings=generation_settings, **options)
+            if code == 0 and args.generation_unit:
+                from .generator.unit import run_unit_generation
+                unit = run_unit_generation(args.source_code,
+                    output_root=args.report_dir or Path.cwd() / ".unit-generation-runs",
+                    timeout_seconds=generation_settings.runner_timeout_seconds)
+                print(f"Unit generation: {unit['status']} {unit['summary_path']}")
+                if unit.get("error"):
+                    print(unit["error"])
+                if unit["status"] != "passed":
+                    code = 1
             if code:
                 raise SystemExit(code)
         else:

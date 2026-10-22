@@ -1,0 +1,17 @@
+{
+  "story": "Покупатель открывает каталог и просматривает выбранный товар.",
+  "steps": [
+    {
+      "endpoint": "GET /catalogue",
+      "expected_status": 200,
+      "expected_result": "Получен массив товаров; для этого сценария нужен хотя бы один товар с id и name."
+    },
+    {
+      "endpoint": "GET /catalogue/{id}",
+      "expected_status": 200,
+      "bindings": [{"from_step": 0, "pointer": "/0/id", "target": "path:id"}],
+      "expected_result": "Получен объект выбранного товара с обязательными полями."
+    }
+  ],
+  "final_goal": "ID и название в карточке товара совпадают с ID и названием выбранного товара из каталога."
+}

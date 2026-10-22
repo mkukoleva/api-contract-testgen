@@ -170,6 +170,33 @@ def run_pipeline(tmp_path, model, runner, saver, **overrides):
     )
 
 
+def test_successful_pytest_with_missing_required_categories_is_incomplete(tmp_path):
+    source = tmp_path / "contract.json"
+    source.write_text(json.dumps({"openapi": "3.0.3", "info": {"title": "Demo", "version": "1"},
+        "paths": {"/catalogue": {"get": {"parameters": [{"in": "query", "name": "limit",
+            "schema": {"type": "integer", "minimum": 1, "maximum": 5}}],
+            "responses": {"200": {"description": "OK"}, "400": {"description": "Bad limit"}}}}}}))
+    model = FakeModel()
+    model.generation_files = [{"name": "test_catalogue.py", "code": GOOD_FILE.replace("test_good", "test_normal_catalogue")}]
+    nodeid = "test_catalogue.py::test_normal_catalogue"
+    result = run_generation_pipeline(settings(tmp_path / "reports", source), model=model,
+        run_tests_fn=lambda config: RunResult("completed", 0, 0.1,
+            tests=(RunnerTestResult(nodeid, "passed"),), http_observations=(
+                {"nodeid": nodeid, "method": "GET", "path": "/catalogue", "status_code": 200},)),
+        save_fn=FakeSaver())
+    assert result.status == "incomplete_categories"
+    assert "Missing required test categories" in result.generator_errors[-1]
+    assert result.category_evidence["status"] == "incomplete"
+    categories = result.category_evidence["operations"][0]["categories"]
+    assert categories["normal"]["status"] == "observed"
+    assert categories["boundary"]["status"] == categories["error"]["status"] == "missing"
+    report = json.loads(Path(result.report_paths["json"]).read_text())
+    assert report["category_evidence"] == result.to_dict()["category_evidence"]
+    assert "GET /catalogue | observed | missing | missing" in Path(result.report_paths["markdown"]).read_text()
+    from prototype.service_tools.runner.tools import _generation_result
+    assert _generation_result(result)["category_evidence"] == result.category_evidence
+
+
 def test_success_is_final_and_llm_is_called_only_for_generation(tmp_path):
     model = FakeModel()
     model.generation_files = [{"name": "test_catalogue.py", "code": GOOD_FILE}]
@@ -186,6 +213,48 @@ def test_success_is_final_and_llm_is_called_only_for_generation(tmp_path):
     assert result.run_result["status"] == "completed"
     assert result.run_result["summary"]["passed"] == 1
     assert result.run_result["summary"]["failed"] == 0
+    plan = result.provenance["scenario_plan"]
+    assert plan["kind"] == "requested_scenarios"
+    assert len(plan["operations"]) == 2
+    assert saver.requests[0].generator_meta["provenance"]["scenario_plan"] == plan
+    report = json.loads(Path(result.report_paths["json"]).read_text())
+    assert report["provenance"]["scenario_plan"] == plan
+
+
+def test_custom_http_fixture_is_reported_without_running_or_repairing(tmp_path):
+    model = FakeModel()
+    model.generation_files = [{"name": "test_http.py", "code": (
+        "import pytest\n@pytest.fixture\ndef api_client(): return object()\n"
+        "def test_normal_http(api_client): assert True\n")}]
+    def no_runner(config):
+        raise AssertionError("Invalid fixture declaration must not reach runner")
+    saver = FakeSaver()
+    result = run_pipeline(tmp_path, model, no_runner, saver)
+    assert result.status == "generation_error"
+    assert len(model.calls) == 1 and not saver.requests
+    assert "custom pytest fixtures" in result.generator_errors[0]
+    assert Path(result.report_paths["json"]).is_file()
+
+
+def test_syntax_repair_cannot_activate_custom_fixtures(tmp_path):
+    model = FakeModel()
+    broken = ("import pytest\n@pytest.fixture\ndef api_client():\n    return object()\n"
+              "def test_bad()\n    assert True\n")
+    fixed = broken.replace("def test_bad()\n", "def test_bad():\n")
+    model.generation_files = [{"name": "test_catalogue.py", "code": broken}]
+    model.repair_responses = [fixed]
+    calls = []
+    def runner(config):
+        from prototype.service_tools.runner.contracts import CompatibilityIssue
+        calls.append(config)
+        return RunResult("collection_error", None, 0.1, compatibility_issues=(
+            CompatibilityIssue("syntax", "test_catalogue.py", "expected ':'", line=5, column=15),),
+            collection_errors=("test_catalogue.py: expected ':'",))
+    saver = FakeSaver()
+    result = run_pipeline(tmp_path, model, runner, saver)
+    assert len(calls) == 1 and len(saver.requests) == 1
+    assert result.repair_log[0].outcome == "error"
+    assert "custom pytest fixtures" in result.repair_log[0].message
 
 
 def test_repeated_generations_keep_separate_suites_and_reports(tmp_path):

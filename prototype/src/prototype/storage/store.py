@@ -42,6 +42,10 @@ def make_slug(title: str, fallback: str) -> str:
 
 def read_contract_title(text: str) -> str:
     """Return info.title of a JSON/YAML contract, or "" if it cannot be read."""
+    return _read_contract_info(text).get("title", "")
+
+
+def _read_contract_info(text: str) -> dict:
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
@@ -50,10 +54,10 @@ def read_contract_title(text: str) -> str:
 
             data = yaml.safe_load(text)
         except Exception:
-            return ""
+            return {}
     info = data.get("info") if isinstance(data, dict) else None
-    title = info.get("title") if isinstance(info, dict) else None
-    return title.strip() if isinstance(title, str) else ""
+    return {key: value.strip() for key, value in (info.items() if isinstance(info, dict) else ())
+            if key in ("title", "version") and isinstance(value, str)}
 
 
 def _output_root(explicit: Path | None) -> Path:
@@ -73,6 +77,11 @@ def _reserve_run_dir(contract_dir: Path, created_at: datetime) -> tuple[str, Pat
         try:
             tmp_dir.mkdir()  # atomic: a concurrent save cannot take the same tmp_dir
         except FileExistsError:
+            continue
+        # A writer can publish after exists(), releasing this temporary name.
+        # Recheck while holding the reservation before reusing its run_id.
+        if (contract_dir / run_id).exists():
+            tmp_dir.rmdir()
             continue
         return run_id, tmp_dir
     raise AssertionError("unreachable")
@@ -95,7 +104,8 @@ def save_test_suite(request: SaveRequest) -> SavedSuite:
     if not contract_path.is_file():
         raise FileNotFoundError(f"contract not found: {contract_path}")
     contract_bytes = contract_path.read_bytes()
-    title = read_contract_title(contract_bytes.decode("utf-8", errors="replace"))
+    info = _read_contract_info(contract_bytes.decode("utf-8", errors="replace"))
+    title = info.get("title", "")
     slug = make_slug(title, contract_path.stem)
 
     contract_dir = _output_root(request.output_root) / slug
@@ -136,6 +146,7 @@ def save_test_suite(request: SaveRequest) -> SavedSuite:
                 "path": str(contract_path),
                 "sha256": hashlib.sha256(contract_bytes).hexdigest(),
                 "title": title,
+                "version": info.get("version"),
                 "slug": slug,
             },
             "generator": {"model": request.model, "meta": request.generator_meta},

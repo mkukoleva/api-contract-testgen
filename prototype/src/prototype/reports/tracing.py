@@ -15,6 +15,7 @@ the API contract and pytest runner results.
 from __future__ import annotations
 
 import ast
+import textwrap
 import re
 from pathlib import Path
 from typing import Any
@@ -272,13 +273,66 @@ def _expected_statuses(function: ast.AST) -> list[str]:
     return sorted(statuses)
 
 
+def _asserted_response_pairs(function: ast.AST, operations) -> set[tuple[str, str]]:
+    """Static, direct equality assertions tied to their response operation.
+
+    This describes source assertions, not observed execution or semantic coverage.
+    Ambiguous branches, helpers and dynamic expected values remain uncounted.
+    """
+    responses = {}
+    pairs = set()
+
+    def origin(value):
+        if isinstance(value, ast.Name):
+            return responses.get(value.id)
+        if (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                and isinstance(value.func.value, ast.Name) and value.func.value.id == "api_client"
+                and value.func.attr.lower() in HTTP_METHODS):
+            path = _extract_call_path(value)
+            for operation in operations:
+                if (path is not None and operation["method"] == value.func.attr.upper()
+                        and _path_matches(operation["path"], path)):
+                    return operation
+        return None
+
+    for statement in function.body:
+        if isinstance(statement, (ast.Return, ast.Raise, ast.Try, ast.TryStar)):
+            break
+        if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            operation = origin(statement.value)
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            for target in targets:
+                for name in ast.walk(target):
+                    if isinstance(name, ast.Name):
+                        responses.pop(name.id, None)
+                        if operation is not None and isinstance(target, ast.Name):
+                            responses[name.id] = operation
+        elif isinstance(statement, ast.Assert):
+            if any(isinstance(n, (ast.Lambda, ast.IfExp)) or
+                   isinstance(n, ast.BoolOp) and isinstance(n.op, ast.Or)
+                   for n in ast.walk(statement.test)):
+                continue
+            for comparison in ast.walk(statement.test):
+                if not isinstance(comparison, ast.Compare) or len(comparison.ops) != 1 or not isinstance(comparison.ops[0], ast.Eq):
+                    continue
+                left, right = comparison.left, comparison.comparators[0]
+                for status, literal in ((left, right), (right, left)):
+                    if not (isinstance(status, ast.Attribute) and status.attr == "status_code"
+                            and isinstance(literal, ast.Constant) and type(literal.value) is int):
+                        continue
+                    operation = origin(status.value)
+                    if operation is not None and str(literal.value) in operation["response_codes"]:
+                        pairs.add((operation["operation"], str(literal.value)))
+    return pairs
+
+
 def _function_source(source: str, node: ast.AST) -> str:
     lines = source.splitlines()
 
     start = getattr(node, "lineno", 1) - 1
     end = getattr(node, "end_lineno", len(lines))
 
-    return "\n".join(lines[start:end])
+    return textwrap.dedent("\n".join(lines[start:end]))
 
 
 def _find_operations(
@@ -479,7 +533,7 @@ def build_result_trace(run) -> dict[str, Any]:
         }
 
         all_response_codes = {
-            code
+            (operation["operation"], code)
             for operation in operations
             for code in operation["response_codes"]
         }
@@ -523,7 +577,7 @@ def build_result_trace(run) -> dict[str, Any]:
         }
 
         covered_operations: set[str] = set()
-        covered_codes: set[str] = set()
+        covered_codes: set[tuple[str, str]] = set()
         covered_parameters: set[str] = set()
 
         traced_tests: list[dict[str, Any]] = []
@@ -557,10 +611,6 @@ def build_result_trace(run) -> dict[str, Any]:
                 for operation in matched_operations:
                     covered_operations.add(operation["operation"])
 
-                    for code in _expected_statuses(node):
-                        if code in operation["response_codes"]:
-                            covered_codes.add(code)
-
                     for call in calls:
                         if call["method"] != operation["method"]:
                             continue
@@ -577,66 +627,83 @@ def build_result_trace(run) -> dict[str, Any]:
                                 if candidate in operation["parameters"]:
                                     covered_parameters.add(candidate)
 
-                nodeid_candidates = [
-                    key
-                    for key in test_results
-                    if key.endswith(f"::{node.name}")
-                    or key.split("::")[-1].startswith(node.name + "[")
-                ]
+                # Match the complete pytest source identity, including class
+                # and every parameterized invocation, never just a function name.
+                parents = {child: parent for parent in ast.walk(tree)
+                           for child in ast.iter_child_nodes(parent)}
+                ancestors = []
+                parent = parents.get(node)
+                while parent is not None:
+                    if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        break
+                    if isinstance(parent, ast.ClassDef):
+                        ancestors.append(parent.name)
+                    parent = parents.get(parent)
+                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                identity = "::".join([*reversed(ancestors), node.name])
+                relative = Path(path).relative_to(tests_dir).as_posix()
+                covered_codes.update(_asserted_response_pairs(node, operations))
+                nodeid_candidates = []
+                for key in test_results:
+                    file_part, separator, test_part = key.replace("\\", "/").partition("::")
+                    matches_file = (file_part == relative or
+                                    file_part.endswith("/" + relative))
+                    if separator and matches_file and (test_part == identity or
+                                                       test_part.startswith(identity + "[")):
+                        nodeid_candidates.append(key)
+                for nodeid in nodeid_candidates or [None]:
+                    result = test_results.get(nodeid, {})
+                    outcome = result.get("outcome", "not_run")
 
-                nodeid = nodeid_candidates[0] if nodeid_candidates else None
+                    expected_statuses = _expected_statuses(node)
 
-                result = test_results.get(nodeid, {})
-                outcome = result.get("outcome", "not_run")
+                    expected_result = (
+                        "Ожидаемый HTTP-статус: "
+                        + ", ".join(expected_statuses)
+                        if expected_statuses
+                        else "Ожидаемый результат определяется проверками теста"
+                    )
 
-                expected_statuses = _expected_statuses(node)
-
-                expected_result = (
-                    "Ожидаемый HTTP-статус: "
-                    + ", ".join(expected_statuses)
-                    if expected_statuses
-                    else "Ожидаемый результат определяется проверками теста"
-                )
-
-                operation_response_codes = {
-                    code
-                    for operation in matched_operations
-                    for code in operation["response_codes"]
-                }
-
-                observation = http_observations.get(nodeid)
-
-                failure = _classify_failure(
-                    outcome,
-                    result.get("message"),
-                    collection_errors=(run.run_result or {}).get(
-                        "collection_errors"
-                    ),
-                    compatibility_issues=(run.run_result or {}).get(
-                        "compatibility_issues"
-                    ),
-                    http_observation=observation,
-                    operation_response_codes=operation_response_codes,
-                )
-
-                traced_tests.append(
-                    {
-                        "nodeid": nodeid or node.name,
-                        "category": _test_category(function_source, node),
-                        "expected_result": expected_result,
-                        "operations": operation_names,
-                        "response_codes": expected_statuses,
-                        "parameters": sorted(
-                            {
-                                parameter
-                                for call in calls
-                                for parameter in call["parameters"]
-                            }
-                        ),
-                        "outcome": outcome,
-                        "failure": failure,
+                    operation_response_codes = {
+                        code
+                        for operation in matched_operations
+                        for code in operation["response_codes"]
                     }
-                )
+
+                    observation = http_observations.get(nodeid)
+
+                    failure = _classify_failure(
+                        outcome,
+                        result.get("message"),
+                        collection_errors=(run.run_result or {}).get(
+                            "collection_errors"
+                        ),
+                        compatibility_issues=(run.run_result or {}).get(
+                            "compatibility_issues"
+                        ),
+                        http_observation=observation,
+                        operation_response_codes=operation_response_codes,
+                    )
+
+                    traced_tests.append(
+                        {
+                            "nodeid": nodeid or node.name,
+                            "category": _test_category(function_source, node),
+                            "expected_result": expected_result,
+                            "operations": operation_names,
+                            "response_codes": expected_statuses,
+                            "parameters": sorted(
+                                {
+                                    parameter
+                                    for call in calls
+                                    for parameter in call["parameters"]
+                                }
+                            ),
+                            "outcome": outcome,
+                            "failure": failure,
+                        }
+                    )
 
         # Add runner results for tests that could not be mapped back to source.
         known_nodeids = {
@@ -699,7 +766,8 @@ def build_result_trace(run) -> dict[str, Any]:
                 "operations_uncovered": uncovered_operations,
                 "response_codes_total": len(all_response_codes),
                 "response_codes_covered": len(covered_codes),
-                "response_codes_uncovered": uncovered_codes,
+                "response_codes_uncovered": [f"{operation} -> {code}" for operation, code in uncovered_codes],
+                "response_codes_basis": "static operation/status equality assertions; not runtime coverage",
                 "parameters_total": len(all_parameters),
                 "parameters_covered": len(covered_parameters),
                 "parameters_uncovered": uncovered_parameters,

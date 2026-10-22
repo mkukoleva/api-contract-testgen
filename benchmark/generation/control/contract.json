@@ -1,0 +1,45 @@
+{
+  "openapi": "3.0.3",
+  "info": {"title": "Generation categories control API", "version": "1.0.0"},
+  "paths": {
+    "/quote": {
+      "post": {
+        "operationId": "calculateQuote",
+        "summary": "Calculate total price from a validated request",
+        "description": "This operation is stateless. Valid JSON objects return 200. Missing body, required fields, invalid types, values outside the schema, unknown fields and null return 422. A nonempty malformed JSON document returns 400. Optional note defaults to an empty string; tags defaults to an empty array. The response echoes quantity, unit_price, note and tags, and total equals round(quantity * unit_price, 2). No other error statuses are expected for these cases.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/QuoteInput"}}}
+        },
+        "responses": {
+          "200": {"description": "Valid quote", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Quote"}}}},
+          "400": {"description": "Nonempty malformed JSON document", "content": {"application/json": {"schema": {"type": "object", "required": ["error", "fields"], "properties": {"error": {"type": "string", "enum": ["invalid_json"]}, "fields": {"type": "array", "items": {"type": "string"}}}}}}},
+          "422": {"description": "Missing body/fields, schema violation, invalid type or out-of-range input", "content": {"application/json": {"schema": {"type": "object", "required": ["error", "fields"], "properties": {"error": {"type": "string", "enum": ["invalid_request"]}, "fields": {"type": "array", "minItems": 1, "items": {"type": "string"}}}}}}}
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "QuoteInput": {
+        "type": "object", "additionalProperties": false, "required": ["quantity", "unit_price"],
+        "properties": {
+          "quantity": {"type": "integer", "minimum": 1, "maximum": 10},
+          "unit_price": {"type": "number", "minimum": 0, "maximum": 1000},
+          "note": {"type": "string", "minLength": 0, "maxLength": 12, "default": ""},
+          "tags": {"type": "array", "minItems": 0, "maxItems": 3, "default": [], "items": {"type": "string", "enum": ["standard", "gift", "express"]}}
+        }
+      },
+      "Quote": {
+        "type": "object", "required": ["quantity", "unit_price", "total", "note", "tags"],
+        "properties": {
+          "quantity": {"type": "integer", "minimum": 1, "maximum": 10},
+          "unit_price": {"type": "number", "minimum": 0, "maximum": 1000},
+          "total": {"type": "number", "minimum": 0, "maximum": 10000},
+          "note": {"type": "string", "maxLength": 12},
+          "tags": {"type": "array", "maxItems": 3, "items": {"type": "string", "enum": ["standard", "gift", "express"]}}
+        }
+      }
+    }
+  }
+}

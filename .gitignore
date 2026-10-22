@@ -22,3 +22,11 @@ prototype/generated/
 prototype/.contract-runs/
 .tool-runs/
 prototype/.tool-runs/
+
+# Итоговые приёмочные прогоны и локальный комплект сдачи
+.acceptance-runs/
+.submission/
+.unit-generation-runs/
+# Локальные заметки, архив промежуточных отчётов и рабочие результаты
+work/
+.DS_Store

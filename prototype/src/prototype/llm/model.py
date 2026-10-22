@@ -45,8 +45,16 @@ def describe_model(model, *, fallback: str | None = None) -> dict:
     def scalar(attribute):
         value = getattr(model, attribute, None)
         return value if isinstance(value, (str, int, float, bool)) else None
-    return {"model": name, "temperature": scalar("temperature"),
-            "timeout_seconds": scalar("request_timeout"), "max_retries": scalar("max_retries")}
+    metadata = {"model": name, "temperature": scalar("temperature"),
+                "timeout_seconds": scalar("request_timeout"), "max_retries": scalar("max_retries")}
+    limit = scalar("max_tokens")
+    if type(limit) is int and limit > 0:
+        metadata["max_output_tokens"] = limit
+    extra = getattr(model, "extra_body", None)
+    template = extra.get("chat_template_kwargs") if isinstance(extra, dict) else None
+    if isinstance(template, dict) and type(template.get("enable_thinking")) is bool:
+        metadata["enable_thinking_requested"] = template["enable_thinking"]
+    return metadata
 
 
 def runtime_versions() -> dict:
@@ -135,6 +143,23 @@ def build_model() -> ChatOpenAI:
     if max_retries < 0:
         raise RuntimeError("DEEPCODE_MAX_RETRIES должен быть целым числом не меньше нуля.")
 
+    options = {}
+    thinking = os.getenv("DEEPCODE_ENABLE_THINKING")
+    if thinking is not None:
+        if thinking.strip().lower() not in {"true", "false"}:
+            raise RuntimeError("DEEPCODE_ENABLE_THINKING должен быть true или false.")
+        options["extra_body"] = {"chat_template_kwargs": {
+            "enable_thinking": thinking.strip().lower() == "true"}}
+    output_limit = os.getenv("DEEPCODE_MAX_OUTPUT_TOKENS")
+    if output_limit is not None:
+        try:
+            output_limit = int(output_limit)
+        except ValueError as exc:
+            raise RuntimeError("DEEPCODE_MAX_OUTPUT_TOKENS должен быть целым числом больше нуля.") from exc
+        if output_limit <= 0:
+            raise RuntimeError("DEEPCODE_MAX_OUTPUT_TOKENS должен быть целым числом больше нуля.")
+        options["max_tokens"] = output_limit
+
     print(f"[LLM] Используется модель: {model_name}")
     print(f"[LLM] API: {base_url}")
 
@@ -153,4 +178,5 @@ def build_model() -> ChatOpenAI:
         # При временной сетевой ошибке разрешаем
         # заданное число повторов (по умолчанию один).
         max_retries=max_retries,
+        **options,
     )
